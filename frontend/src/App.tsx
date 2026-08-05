@@ -21,6 +21,7 @@ export default function App() {
         </div>
 
         <Footer />
+        
       </div>
     </div>
   );
