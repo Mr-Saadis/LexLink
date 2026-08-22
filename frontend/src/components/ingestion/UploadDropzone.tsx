@@ -23,11 +23,15 @@ export default function UploadDropzone({ onFilesSelected }: UploadDropzoneProps)
     if (onFilesSelected && e.target.files?.length) {
       onFilesSelected(Array.from(e.target.files));
     }
+    // FIX: input ki value reset karna zaroori hai warna agar user same
+    // file dobara select kare to onChange fire hi nahi hota (browser
+    // isay "no change" samajhta hai).
+    e.target.value = "";
   };
 
   return (
     <div
-      className="rounded-xl border p-6 flex flex-col items-center justify-center text-center"
+      className="h-full rounded-xl border p-6 flex flex-col items-center justify-center text-center transition-colors duration-150"
       style={{
         borderColor: dragOver ? GREEN : BORDER,
         borderStyle: "dashed",
@@ -41,8 +45,13 @@ export default function UploadDropzone({ onFilesSelected }: UploadDropzoneProps)
       onDrop={handleDrop}
     >
       <div
-        className="rounded-full flex items-center justify-center mb-3"
-        style={{ width: 52, height: 52, background: "#EEF2F6" }}
+        className="rounded-full flex items-center justify-center mb-3 transition-transform duration-150"
+        style={{
+          width: 52,
+          height: 52,
+          background: "#EEF2F6",
+          transform: dragOver ? "scale(1.08)" : "scale(1)",
+        }}
       >
         <UploadCloud size={24} color={NAVY} />
       </div>
@@ -62,7 +71,7 @@ export default function UploadDropzone({ onFilesSelected }: UploadDropzoneProps)
       />
       <button
         onClick={() => inputRef.current?.click()}
-        className="mt-4 px-5 py-2 rounded-lg text-sm font-semibold border"
+        className="mt-4 px-5 py-2 rounded-lg text-sm font-semibold border transition-colors duration-150 hover:bg-gray-50 active:scale-[0.98]"
         style={{ borderColor: BORDER, color: TEXT }}
       >
         Select Files

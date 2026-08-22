@@ -6,14 +6,16 @@ already call kar raha hai:
 
     fetch("http://localhost:8000/api/upload-judgment", {
         method: "POST",
-        body: formData,   // fields: file, court_type, dry_run
+        body: formData,   // fields: file, dry_run
     })
 
 "Select Files" click karne pe -> handleFilesSelected -> processFileIngestion
--> yeh endpoint hit hota hai -> judgment_pipeline.process_pdf() chalta hai
--> full chunked result JSON disk pe save hota hai (CHUNK_OUTPUT_FOLDER me)
--> response frontend ko wapas jata hai jahan se data.metadata.case_number
-queue card pe dikhaya jata hai.
+-> yeh endpoint hit hota hai -> judgement_pipeline.process_pdf_stream()
+STREAM hota hai (parsing -> extracting -> verifying -> final), taake
+frontend har stage pe UI update kar sake -> full chunked result JSON
+disk pe save hota hai (CHUNK_OUTPUT_FOLDER me) -> aakhri "final" event
+frontend ko milta hai jahan se data.metadata.case_number queue card pe
+dikhaya jata hai.
 
 Run karne ke liye:
     pip install fastapi uvicorn python-multipart pymupdf
@@ -25,11 +27,13 @@ import os
 import shutil
 import tempfile
 import json
+import uuid
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from judgement_pipeline import process_pdf
+from judgement_pipeline import process_pdf_stream
 
 app = FastAPI(title="LexLink Ingestion API")
 
@@ -38,7 +42,6 @@ app = FastAPI(title="LexLink Ingestion API")
 # Production me isko apne actual frontend domain tak restrict karna.
 app.add_middleware(
     CORSMiddleware,
-    # SECURITY FIX: Restrict CORS origins in production instead of ["*"]
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,7 +57,6 @@ os.makedirs(CHUNK_OUTPUT_FOLDER, exist_ok=True)
 @app.post("/api/upload-judgment")
 async def upload_judgment(
     file: UploadFile = File(...),
-    court_type: str = Form(default="HC"),
     dry_run: str = Form(default="true"),
 ):
     # Uploaded file ko disk pe temp location par save karna zaroori hai
@@ -65,53 +67,55 @@ async def upload_judgment(
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
-    try:
-        result = process_pdf(tmp_path, declared_court_type=court_type)
-    finally:
-        # Temp file cleanup - chahe success ho ya exception
-        os.remove(tmp_path)
+    def event_generator():
+        try:
+            for event in process_pdf_stream(tmp_path):
+                if event["type"] == "error":
+                    yield json.dumps({"success": False, "detail": event["detail"]}) + "\n"
+                    return
 
-    if "error" in result:
-        return {"success": False, "detail": result["error"]}
+                if event["type"] == "progress":
+                    yield json.dumps({
+                        "type": "progress",
+                        "stage_index": event["stage_index"],
+                        "stage_name": event["stage_name"],
+                    }) + "\n"
+                    continue
 
-    import uuid
-    # ---- ALWAYS save the full chunked result as JSON, chahe dry_run kuch
-    # bhi ho. dry_run sirf yeh control karta hai ke Supabase/Qdrant me
-    # persist hota hai ya nahi (abhi stub hai) - JSON file har upload pe
-    # banti hai, yehi tumne mangi thi.
-    
-    # SECURITY FIX: Path Traversal prevention
-    # Avoid using file.filename directly to construct file paths.
-    out_name = f"{uuid.uuid4()}.json"
-    out_path = os.path.join(CHUNK_OUTPUT_FOLDER, out_name)
+                if event["type"] == "result":
+                    result = event["data"]
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+                    # SECURITY FIX: Path Traversal prevention
+                    # Avoid using file.filename directly to construct file paths.
+                    out_name = f"{uuid.uuid4()}.json"
+                    out_path = os.path.join(CHUNK_OUTPUT_FOLDER, out_name)
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        json.dump(result, f, ensure_ascii=False, indent=2)
 
-    # dry_run == "true" -> sirf JSON save hoga, database/Qdrant me kuch
-    # save nahi hoga. dry_run == "false" -> yahan par Supabase (DOCUMENTS +
-    # CHUNKS tables) aur Qdrant embedding insert ka code aayega - filhal stub.
-    if dry_run.lower() != "true":
-        # TODO: Supabase DOCUMENTS row insert -> document_id milega
-        # TODO: har chunk ko us document_id se link karke CHUNKS table me insert
-        # TODO: chunks ko all-MiniLM-L6-v2 se embed karke Qdrant me push
-        db_persisted = False  # abhi tak DB me actually persist nahi hua
-    else:
-        db_persisted = None  # dry run - DB persist hi nahi hona tha
+                    if dry_run.lower() != "true":
+                        # TODO: Supabase DOCUMENTS row insert -> document_id milega
+                        # TODO: har chunk ko us document_id se link karke CHUNKS table me insert
+                        # TODO: chunks ko all-MiniLM-L6-v2 se embed karke Qdrant me push
+                        db_persisted = False
+                    else:
+                        db_persisted = None
 
-    return {
-        "success": True,
-        "metadata": result["metadata"],
-        "total_chunks": result["total_chunks"],
-        "total_lines": result["total_lines"],
-        "boilerplate_removed_count": len(result["boilerplate_removed"]),
-        "source_file": result["source_file"],
-        "json_saved_to": out_path,
-        "db_persisted": db_persisted,
-        # Poora chunk text + bbox array chahiye ho response me bhi to
-        # "chunks": result["chunks"] yahan add kar sakti ho - filhal
-        # payload size chhota rakhne ke liye JSON file me hi rakha hai.
-    }
+                    final_payload = {
+                        "type": "final",
+                        "success": True,
+                        "metadata": result["metadata"],
+                        "total_chunks": result["total_chunks"],
+                        "total_lines": result["total_lines"],
+                        "boilerplate_removed_count": len(result["boilerplate_removed"]),
+                        "source_file": result["source_file"],
+                        "json_saved_to": out_path,
+                        "db_persisted": db_persisted,
+                    }
+                    yield json.dumps(final_payload) + "\n"
+        finally:
+            os.remove(tmp_path)
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 if __name__ == "__main__":

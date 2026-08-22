@@ -23,7 +23,10 @@ interface PipelineJobCardProps {
 
 export default function PipelineJobCard({ job, onRetry, onIgnore }: PipelineJobCardProps) {
   return (
-    <div className="rounded-lg border p-4" style={{ borderColor: BORDER }}>
+    <div
+      className="rounded-lg border p-4 transition-shadow duration-150 hover:shadow-sm"
+      style={{ borderColor: BORDER, background: "#fff" }}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-2 min-w-0">
           {job.status === "failed" ? (
