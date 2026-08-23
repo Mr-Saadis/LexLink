@@ -9,29 +9,45 @@ interface StageDotsProps {
 }
 
 export default function StageDots({ stageIndex, status }: StageDotsProps) {
+  const isFinished = status === "verified" || status === "completed";
+
   return (
-    <div className="flex items-center gap-1.5 mt-3">
+    <div className="flex items-center justify-between w-full mt-3">
       {STAGES.map((stage: string, i: number) => {
-        const done = i < stageIndex;
+        const done = isFinished ? i <= stageIndex : i < stageIndex;
         const current = i === stageIndex && status === "processing";
         const failed = i === stageIndex && status === "failed";
+        const isPendingFutureStage = i > stageIndex;
+
         return (
-          <div key={stage} className="flex flex-col items-center gap-1" style={{ width: 56 }}>
+          <div key={stage} className="flex-1 flex flex-col items-center gap-1 min-w-0">
             <div className="flex items-center w-full">
               {i !== 0 && (
                 <div
-                  className="h-[2px] flex-1"
+                  className="h-[2px] flex-1 transition-colors duration-200"
                   style={{ background: done || current ? GREEN : BORDER }}
                 />
               )}
               <div
-                className="rounded-full flex items-center justify-center shrink-0"
+                className="rounded-full flex items-center justify-center shrink-0 transition-all duration-200"
                 style={{
                   width: 16,
                   height: 16,
-                  background: failed ? RED : done ? GREEN : current ? BLUE : "#fff",
+                  background: failed
+                    ? RED
+                    : done
+                    ? GREEN
+                    : current
+                    ? BLUE
+                    : "#fff",
                   border: `2px solid ${
-                    failed ? RED : done ? GREEN : current ? BLUE : BORDER
+                    failed
+                      ? RED
+                      : done
+                      ? GREEN
+                      : current
+                      ? BLUE
+                      : BORDER
                   }`,
                 }}
               >
@@ -39,14 +55,25 @@ export default function StageDots({ stageIndex, status }: StageDotsProps) {
               </div>
               {i !== STAGES.length - 1 && (
                 <div
-                  className="h-[2px] flex-1"
-                  style={{ background: done ? GREEN : BORDER }}
+                  className="h-[2px] flex-1 transition-colors duration-200"
+                  style={{
+                    background: done && i < stageIndex ? GREEN : BORDER,
+                  }}
                 />
               )}
             </div>
             <span
-              className="text-[9px] text-center leading-tight"
-              style={{ color: current ? BLUE : done ? GREEN_DARK : MUTED }}
+              className="text-[9px] text-center leading-tight truncate px-0.5"
+              style={{
+                color: current
+                  ? BLUE
+                  : done
+                  ? GREEN_DARK
+                  : isPendingFutureStage
+                  ? MUTED
+                  : MUTED,
+                fontWeight: done || current ? 600 : 400,
+              }}
             >
               {stage}
             </span>

@@ -9,7 +9,8 @@ const initialQueue: Job[] = [];
 
 export default function DocumentIngestion() {
   const [queue, setQueue] = useState<Job[]>(initialQueue);
-  const filesRef = useState(() => new Map<number, File>())[0];
+  const [saveToDb, setSaveToDb] = useState<boolean>(true);
+  const filesRef = useState(() => new Map<number, { file: File; courtType: "SC" | "HC" }>())[0];
 
   const doneCount = queue.filter(
     (q) => (q.status as string) === "done" || q.status === "verified" || q.status === "completed"
@@ -21,10 +22,12 @@ export default function DocumentIngestion() {
     );
   };
 
-  const processFileIngestion = async (file: File, jobId: number) => {
+  const processFileIngestion = async (file: File, jobId: number, courtType: "SC" | "HC" = "SC") => {
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("dry_run", "true");
+    formData.append("dry_run", saveToDb ? "false" : "true");
+    formData.append("court_type", courtType);
+    formData.append("court_type_declared", courtType);
 
     try {
       const response = await fetch("http://localhost:8000/api/upload-judgment", {
@@ -47,10 +50,15 @@ export default function DocumentIngestion() {
         if (event.type === "progress") {
           updateJob(jobId, { stageIndex: event.stage_index });
         } else if (event.type === "final") {
+          const finalCourt = event.metadata?.court_type || courtType;
+          const isPersisted = event.db_persisted;
+          const statusText = isPersisted ? "SAVED TO DB" : "EXTRACTED";
+          
           updateJob(jobId, {
-            status: "verified",
-            stageIndex: 3,
-            meta: `CASE REF: ${event.metadata?.case_number || "EXTRACTED"} • ${(file.size / 1024 / 1024).toFixed(1)}MB`,
+            status: isPersisted ? "completed" : "verified",
+            stageIndex: isPersisted ? 4 : 3,
+            courtType: finalCourt,
+            meta: `REF: ${event.metadata?.case_number || statusText} • ${finalCourt} • ${(file.size / 1024 / 1024).toFixed(1)}MB${isPersisted ? ` (${event.chunks_saved} chunks saved)` : ""}`,
           });
         } else if (event.success === false) {
           throw new Error(event.detail || "Extraction failed");
@@ -82,35 +90,36 @@ export default function DocumentIngestion() {
     }
   };
 
-  const handleFilesSelected = (files: File[]) => {
+  const handleFilesSelected = (files: File[], courtType: "SC" | "HC" = "SC") => {
     files.forEach((file, idx) => {
       const jobId = Date.now() + idx;
 
-      filesRef.set(jobId, file);
+      filesRef.set(jobId, { file, courtType });
 
       const newJob: Job = {
         id: jobId,
         name: file.name,
-        meta: `CASE REF: PROCESSING • ${(file.size / 1024 / 1024).toFixed(1)}MB`,
+        meta: `CASE REF: PROCESSING • ${courtType} • ${(file.size / 1024 / 1024).toFixed(1)}MB`,
         status: "processing",
         stageIndex: 0,
+        courtType: courtType,
       };
 
       setQueue((prev) => [newJob, ...prev]);
 
-      processFileIngestion(file, jobId);
+      processFileIngestion(file, jobId, courtType);
     });
   };
 
   const retryJob = (id: number) => {
-    const file = filesRef.get(id);
-    if (!file) {
+    const entry = filesRef.get(id);
+    if (!entry) {
       updateJob(id, { error: "Original file not found — please re-upload." });
       return;
     }
 
     updateJob(id, { status: "processing", stageIndex: 0, error: undefined });
-    processFileIngestion(file, id);
+    processFileIngestion(entry.file, id, entry.courtType);
   };
 
   const ignoreJob = (id: number) => {
@@ -119,7 +128,17 @@ export default function DocumentIngestion() {
   };
 
   const handleResumeBatch = () => {
-    console.log("Resume batch clicked");
+    // Find all failed jobs and retry them automatically
+    const failedJobs = queue.filter((j) => j.status === "failed");
+    if (failedJobs.length > 0) {
+      failedJobs.forEach((job) => {
+        retryJob(job.id);
+      });
+    }
+  };
+
+  const handleClearCompleted = () => {
+    setQueue((prev) => prev.filter((j) => j.status !== "verified" && (j.status as string) !== "completed"));
   };
 
   return (
@@ -139,10 +158,18 @@ export default function DocumentIngestion() {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
-        <UploadDropzone onFilesSelected={handleFilesSelected} />
+      {/* Grid with items-start so UploadDropzone does NOT stretch vertically */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+        <div className="sticky top-6">
+          <UploadDropzone onFilesSelected={handleFilesSelected} />
+        </div>
 
-        <PipelineQueue queue={queue} onRetry={retryJob} onIgnore={ignoreJob} />
+        <PipelineQueue 
+          queue={queue} 
+          onRetry={retryJob} 
+          onIgnore={ignoreJob} 
+          onClearCompleted={handleClearCompleted}
+        />
       </div>
     </div>
   );

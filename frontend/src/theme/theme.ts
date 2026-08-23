@@ -15,7 +15,7 @@ export const MUTED = "#64748B";       // Muted text
 export const TEXT = "#0F172A";        // Dark text color
 export const BG = "#F0FDF4";          // Light Mint Tint background
 
-export const STAGES = ["Upload", "Parse", "Index", "Verify"];
+export const STAGES = ["Upload", "Parse", "Chunk", "Verify", "Index"];
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed" | "verified";
 

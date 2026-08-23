@@ -326,11 +326,18 @@ def extract_judge_from_lines(lines):
     return None
 
 
-def extract_metadata(full_text_first_page, lines):
+def extract_metadata(full_text_first_page, lines, declared_court_type="SC"):
     text = _normalize_spaces(full_text_first_page)
+
+    # Normalize declared_court_type to either "SC" or "HC" (default "SC")
+    decl = (declared_court_type or "SC").strip().upper()
+    if decl not in ("SC", "HC"):
+        decl = "SC" if "supreme" in decl.lower() else "HC"
 
     meta = {
         "court": None,
+        "court_type": None,
+        "court_type_declared": decl,
         "case_number": None,
         "parties": None,
         "judge": None,
@@ -339,8 +346,23 @@ def extract_metadata(full_text_first_page, lines):
     }
 
     court_match = _COURT_RE.search(text)
+    auto_court_type = None
     if court_match:
         meta["court"] = re.sub(r"\s+", " ", court_match.group(1)).strip()
+        c_lower = meta["court"].lower()
+        if "supreme" in c_lower:
+            auto_court_type = "SC"
+        elif "high court" in c_lower or "tribunal" in c_lower:
+            auto_court_type = "HC"
+
+    # Fallback to declared_court_type if automatic extraction cannot determine court_type
+    final_court_type = auto_court_type or decl
+    meta["court_type"] = final_court_type
+    meta["court_type_declared"] = decl
+
+    # If court name was not detected from text, provide a sensible default name
+    if not meta["court"]:
+        meta["court"] = "SUPREME COURT OF PAKISTAN" if final_court_type == "SC" else "HIGH COURT"
 
     case_match = _CASE_NO_SC_RE.search(text)
     if case_match:
@@ -372,7 +394,7 @@ def extract_metadata(full_text_first_page, lines):
 # ----------------------------------------------------------------------
 # MAIN pipeline for one PDF (non-streaming - batch_cli.py ke liye)
 # ----------------------------------------------------------------------
-def process_pdf(pdf_path):
+def process_pdf(pdf_path, declared_court_type="SC"):
     lines = extract_lines(pdf_path)
     if not lines:
         return {"error": "No extractable text (likely scanned image PDF - needs OCR)"}
@@ -380,7 +402,7 @@ def process_pdf(pdf_path):
     cleaned_lines, boilerplate = remove_boilerplate(lines)
 
     first_page_text = " ".join(ln["text"] for ln in lines if ln["page"] == 1)
-    metadata = extract_metadata(first_page_text, lines)
+    metadata = extract_metadata(first_page_text, lines, declared_court_type=declared_court_type)
 
     chunks = build_chunks(cleaned_lines)
 
@@ -403,7 +425,7 @@ def process_pdf(pdf_path):
 # karta hai, taake frontend real-time stageIndex update kar sake.
 # api_server.py isko use karta hai.
 # ----------------------------------------------------------------------
-def process_pdf_stream(pdf_path):
+def process_pdf_stream(pdf_path, declared_court_type="SC"):
     """
     Generator hai - process_pdf() jaisa hi kaam karta hai lekin har
     major step ke baad ek dict yield karta hai:
@@ -419,13 +441,13 @@ def process_pdf_stream(pdf_path):
         yield {"type": "error", "detail": "No extractable text (likely scanned image PDF - needs OCR)"}
         return
 
-    yield {"type": "progress", "stage_index": 2, "stage_name": "extracting"}
+    yield {"type": "progress", "stage_index": 2, "stage_name": "chunking"}
     cleaned_lines, boilerplate = remove_boilerplate(lines)
     chunks = build_chunks(cleaned_lines)
 
     yield {"type": "progress", "stage_index": 3, "stage_name": "verifying"}
     first_page_text = " ".join(ln["text"] for ln in lines if ln["page"] == 1)
-    metadata = extract_metadata(first_page_text, lines)
+    metadata = extract_metadata(first_page_text, lines, declared_court_type=declared_court_type)
 
     for chunk in chunks:
         chunk["document_id"] = None

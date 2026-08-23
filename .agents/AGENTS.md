@@ -16,6 +16,6 @@ These rules apply to all agents working on the LexLink project.
   - Use TypeScript strictly. No `any` unless absolutely necessary.
   - Maintain a clean component structure within `frontend/src`.
 
-## Best Practices
-- Run `npm audit` periodically on the frontend.
-- Ensure backend API URLs are handled through environment variables (`VITE_API_URL` in frontend).
+## Documentation & Governance
+- Refer to [docs/GOVERNANCE.md](../docs/GOVERNANCE.md) as the Single Source of Truth (SSOT).
+- Detailed specifications are available in `docs/`: `ROLES.md`, `SKILLS.md`, `POLICIES.md`, `DESIGN_SYSTEM.md`, `FRONTEND_GUIDELINES.md`, `ARCHITECTURE.md`, `DB_SCHEMA.md`, `API_ENDPOINTS.md`, `RAG_PIPELINE.md`.

@@ -34,6 +34,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from judgement_pipeline import process_pdf_stream
+from supabase_client import (
+    is_supabase_configured,
+    save_judgment_to_supabase,
+    get_supabase_client,
+)
 
 app = FastAPI(title="LexLink Ingestion API")
 
@@ -54,22 +59,59 @@ CHUNK_OUTPUT_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 os.makedirs(CHUNK_OUTPUT_FOLDER, exist_ok=True)
 
 
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "online",
+        "supabase_connected": is_supabase_configured(),
+    }
+
+
+@app.get("/api/documents")
+async def list_documents(limit: int = 50, offset: int = 0):
+    client = get_supabase_client()
+    if not client:
+        return {"documents": [], "message": "Supabase not configured"}
+
+    try:
+        res = (
+            client.table("documents")
+            .select("*")
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return {"documents": res.data or []}
+    except Exception as e:
+        return {"error": str(e), "documents": []}
+
+
 @app.post("/api/upload-judgment")
 async def upload_judgment(
     file: UploadFile = File(...),
     dry_run: str = Form(default="true"),
+    court_type: str = Form(default="SC"),
+    court_type_declared: str = Form(default=None),
+    uploaded_by: str = Form(default=None),
 ):
+    # Determine declared court type (defaults to "SC" if unspecified)
+    declared_type = court_type_declared or court_type or "SC"
+    declared_type = declared_type.strip().upper()
+    if declared_type not in ("SC", "HC"):
+        declared_type = "SC" if "supreme" in declared_type.lower() else "HC"
+
     # Uploaded file ko disk pe temp location par save karna zaroori hai
     # kyunke PyMuPDF (fitz) file PATH se open karta hai, in-memory bytes
     # se seedha nahi.
-    suffix = os.path.splitext(file.filename or "")[1] or ".pdf"
+    orig_filename = file.filename or "uploaded.pdf"
+    suffix = os.path.splitext(orig_filename)[1] or ".pdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
     def event_generator():
         try:
-            for event in process_pdf_stream(tmp_path):
+            for event in process_pdf_stream(tmp_path, declared_court_type=declared_type):
                 if event["type"] == "error":
                     yield json.dumps({"success": False, "detail": event["detail"]}) + "\n"
                     return
@@ -84,21 +126,21 @@ async def upload_judgment(
 
                 if event["type"] == "result":
                     result = event["data"]
+                    result["source_file"] = orig_filename
 
-                    # SECURITY FIX: Path Traversal prevention
-                    # Avoid using file.filename directly to construct file paths.
+                    # Save JSON to disk for caching & verification
                     out_name = f"{uuid.uuid4()}.json"
                     out_path = os.path.join(CHUNK_OUTPUT_FOLDER, out_name)
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(result, f, ensure_ascii=False, indent=2)
 
-                    if dry_run.lower() != "true":
-                        # TODO: Supabase DOCUMENTS row insert -> document_id milega
-                        # TODO: har chunk ko us document_id se link karke CHUNKS table me insert
-                        # TODO: chunks ko all-MiniLM-L6-v2 se embed karke Qdrant me push
-                        db_persisted = False
-                    else:
-                        db_persisted = None
+                    # If dry_run is false AND Supabase credentials exist, persist to database
+                    db_result = None
+                    if dry_run.lower() != "true" and is_supabase_configured():
+                        db_result = save_judgment_to_supabase(
+                            result_data=result,
+                            uploaded_by=uploaded_by,
+                        )
 
                     final_payload = {
                         "type": "final",
@@ -107,13 +149,16 @@ async def upload_judgment(
                         "total_chunks": result["total_chunks"],
                         "total_lines": result["total_lines"],
                         "boilerplate_removed_count": len(result["boilerplate_removed"]),
-                        "source_file": result["source_file"],
+                        "source_file": orig_filename,
                         "json_saved_to": out_path,
-                        "db_persisted": db_persisted,
+                        "db_persisted": bool(db_result),
+                        "document_id": db_result.get("document_id") if db_result else None,
+                        "chunks_saved": db_result.get("total_chunks_saved") if db_result else 0,
                     }
                     yield json.dumps(final_payload) + "\n"
         finally:
-            os.remove(tmp_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
