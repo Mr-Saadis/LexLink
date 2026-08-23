@@ -39,8 +39,13 @@ from supabase_client import (
     save_judgment_to_supabase,
     get_supabase_client,
 )
+from r2_client import (
+    is_r2_configured,
+    upload_file_to_r2,
+)
 
 app = FastAPI(title="LexLink Ingestion API")
+
 
 # Dev ke liye CORS open rakha hai (frontend Vite/CRA dev server alag port
 # pe chalta hai, e.g. localhost:5173, jab backend localhost:8000 pe hai).
@@ -64,7 +69,9 @@ async def health_check():
     return {
         "status": "online",
         "supabase_connected": is_supabase_configured(),
+        "cloudflare_r2_connected": is_r2_configured(),
     }
+
 
 
 @app.get("/api/documents")
@@ -134,13 +141,30 @@ async def upload_judgment(
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(result, f, ensure_ascii=False, indent=2)
 
-                    # If dry_run is false AND Supabase credentials exist, persist to database
+                    # Upload to Cloudflare R2 and persist to Supabase
                     db_result = None
-                    if dry_run.lower() != "true" and is_supabase_configured():
-                        db_result = save_judgment_to_supabase(
-                            result_data=result,
-                            uploaded_by=uploaded_by,
-                        )
+                    r2_pdf_url = None
+
+                    if dry_run.lower() != "true":
+                        # 1. Upload original PDF to Cloudflare R2 if configured
+                        if is_r2_configured():
+                            object_key = f"judgments/{uuid.uuid4()}_{orig_filename}"
+                            print(f"[Upload] Uploading PDF '{orig_filename}' to Cloudflare R2: {object_key}...")
+                            r2_pdf_url = upload_file_to_r2(tmp_path, object_key, content_type="application/pdf")
+                            print(f"[Upload] Cloudflare R2 URL generated: {r2_pdf_url}")
+                        else:
+                            print("[Upload] Cloudflare R2 is not configured. Skipping R2 upload.")
+
+                        # 2. Persist to Supabase Database
+                        if is_supabase_configured():
+                            print(f"[Upload] Persisting judgment '{orig_filename}' to Supabase...")
+                            db_result = save_judgment_to_supabase(
+                                result_data=result,
+                                pdf_url=r2_pdf_url,
+                                uploaded_by=uploaded_by,
+                            )
+                    else:
+                        print("[Upload] Dry run mode active: skipping R2 and DB persistence.")
 
                     final_payload = {
                         "type": "final",
@@ -151,6 +175,7 @@ async def upload_judgment(
                         "boilerplate_removed_count": len(result["boilerplate_removed"]),
                         "source_file": orig_filename,
                         "json_saved_to": out_path,
+                        "pdf_url": r2_pdf_url,
                         "db_persisted": bool(db_result),
                         "document_id": db_result.get("document_id") if db_result else None,
                         "chunks_saved": db_result.get("total_chunks_saved") if db_result else 0,
