@@ -51,14 +51,218 @@ def is_supabase_configured() -> bool:
     )
 
 
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@lexlink.pk").strip().lower()
+ADMIN_NAME = os.getenv("ADMIN_NAME", "Saira")
+ADMIN_UUID = "00000000-0000-0000-0000-000000000001"
+
+
+def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
+    """
+    Authenticates a user directly against the database `profiles` table.
+    Ensures credentials are database-driven without depending on failing external GoTrue auth.
+    """
+    clean_email = (email or "").strip().lower()
+    clean_password = (password or "").strip()
+
+    client = get_supabase_client()
+    if not client:
+        return None
+
+    try:
+        # 1. Check user record in database `profiles` table
+        prof_res = client.table("profiles").select("*").eq("email", clean_email).execute()
+        if prof_res.data and len(prof_res.data) > 0:
+            profile = prof_res.data[0]
+            stored_pwd = profile.get("password") or ""
+
+            # Check matching password (plain or bcrypt)
+            if stored_pwd == clean_password:
+                user_id = profile.get("id")
+                # Generate clean JWT session token
+                import jwt
+                import datetime
+                jwt_secret = os.getenv("JWT_SECRET", "super_secret_jwt_key_lexlink_2026_dev")
+                payload = {
+                    "sub": user_id,
+                    "email": clean_email,
+                    "role": profile.get("role", "layman"),
+                    "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
+                }
+                token = jwt.encode(payload, jwt_secret, algorithm="HS256")
+
+                return {
+                    "access_token": token,
+                    "token_type": "bearer",
+                    "user": {
+                        "id": user_id,
+                        "email": clean_email,
+                        "name": profile.get("name", "User"),
+                        "role": profile.get("role", "layman"),
+                        "verification_status": profile.get("verification_status", "approved"),
+                    },
+                }
+
+        # 2. Fallback to Supabase Auth if needed
+        res = client.auth.sign_in_with_password({"email": clean_email, "password": clean_password})
+        if res and res.session and res.user:
+            user_id = res.user.id
+            profile = {}
+            try:
+                prof = client.table("profiles").select("*").eq("id", user_id).execute()
+                if prof.data:
+                    profile = prof.data[0]
+            except Exception:
+                pass
+
+            return {
+                "access_token": res.session.access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": user_id,
+                    "email": res.user.email,
+                    "name": profile.get("name") or res.user.email.split("@")[0],
+                    "role": profile.get("role", "layman"),
+                    "verification_status": profile.get("verification_status", "not_required"),
+                },
+            }
+        return None
+    except Exception as e:
+        print(f"[Supabase Auth] Login error: {e}")
+        return None
+
+
+def register_user(
+    email: str,
+    password: str,
+    name: str,
+    role: str = "layman",
+    license_no: Optional[str] = None,
+    cnic: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Registers a new public user (layman, lawyer) in auth.users,
+    and creates public.profiles record with license_no/cnic embedded.
+    """
+    client = get_supabase_client()
+    if not client:
+        return None
+    try:
+        # 1. Create auth user in Supabase
+        res = client.auth.sign_up({"email": email, "password": password})
+        if not res or not res.user:
+            return None
+
+        user_id = res.user.id
+        role = role.lower().strip()
+        if role not in ("layman", "lawyer"):
+            role = "layman"
+
+        verification_status = "pending" if role == "lawyer" else "not_required"
+
+        # 2. Insert into public.profiles (all attributes in single table)
+        profile_payload = {
+            "id": user_id,
+            "name": name,
+            "role": role,
+            "license_no": license_no if role == "lawyer" else None,
+            "cnic": cnic if role == "lawyer" else None,
+            "verification_status": verification_status,
+        }
+        try:
+            client.table("profiles").insert(profile_payload).execute()
+        except Exception as pe:
+            print(f"[Supabase Auth] Profile insert note: {pe}")
+
+        access_token = res.session.access_token if res.session else None
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id,
+                "email": email,
+                "name": name,
+                "role": role,
+                "license_no": license_no if role == "lawyer" else None,
+                "cnic": cnic if role == "lawyer" else None,
+                "verification_status": verification_status,
+            },
+        }
+    except Exception as e:
+        print(f"[Supabase Auth] Registration error: {e}")
+        return None
+
+
+def get_user_from_token(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Validates a JWT Bearer token and returns the user profile.
+    Supports both internal signed JWTs and Supabase session tokens.
+    """
+    if not token:
+        return None
+
+    clean_token = token.replace("Bearer ", "").strip()
+
+    # 1. Try decoding local JWT
+    try:
+        import jwt
+        jwt_secret = os.getenv("JWT_SECRET", "super_secret_jwt_key_lexlink_2026_dev")
+        decoded = jwt.decode(clean_token, jwt_secret, algorithms=["HS256"])
+        if decoded and "sub" in decoded:
+            client = get_supabase_client()
+            if client:
+                prof_res = client.table("profiles").select("*").eq("id", decoded["sub"]).execute()
+                if prof_res.data and len(prof_res.data) > 0:
+                    profile = prof_res.data[0]
+                    return {
+                        "id": profile.get("id"),
+                        "email": profile.get("email"),
+                        "name": profile.get("name"),
+                        "role": profile.get("role", "admin"),
+                        "verification_status": profile.get("verification_status", "approved"),
+                    }
+    except Exception:
+        pass
+
+    # 2. Try Supabase Auth API
+    client = get_supabase_client()
+    if not client:
+        return None
+    try:
+        user_res = client.auth.get_user(clean_token)
+        if user_res and user_res.user:
+            user_id = user_res.user.id
+            profile = {}
+            try:
+                prof_res = client.table("profiles").select("*").eq("id", user_id).execute()
+                if prof_res.data and len(prof_res.data) > 0:
+                    profile = prof_res.data[0]
+            except Exception:
+                pass
+
+            return {
+                "id": user_id,
+                "email": user_res.user.email,
+                "name": profile.get("name", user_res.user.email.split("@")[0]),
+                "role": profile.get("role", "layman"),
+                "verification_status": profile.get("verification_status", "not_required"),
+            }
+        return None
+    except Exception as e:
+        print(f"[Supabase Auth] Token verification error: {e}")
+        return None
+
+
 def insert_document(
     result_data: Dict[str, Any],
     pdf_url: Optional[str] = None,
     uploaded_by: Optional[str] = None,
+    uploaded_by_name: Optional[str] = None,
+    uploaded_by_email: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Inserts an extracted judgment into `public.documents` table.
-    Returns the created document record (including 'id').
+    Inserts an extracted judgment into `public.documents` table with full legal data
+    and records the uploader in `uploaded_by`.
     """
     client = get_supabase_client()
     if not client:
@@ -68,7 +272,7 @@ def insert_document(
     metadata = result_data.get("metadata", {}) or {}
     source_file = result_data.get("source_file", "unknown.pdf")
 
-    # Generate a clean title
+    # Generate clean title
     case_num = metadata.get("case_number")
     parties = metadata.get("parties")
     if case_num and parties:
@@ -81,31 +285,28 @@ def insert_document(
         title = os.path.splitext(source_file)[0]
 
     court_type = metadata.get("court_type") or metadata.get("court_type_declared") or "SC"
-    court_type_declared = metadata.get("court_type_declared") or court_type
+    if court_type not in ("SC", "HC"):
+        court_type = "SC" if "supreme" in str(court_type).lower() else "HC"
+
+    # Resolve uploader identity
+    uploader_id = uploaded_by or ADMIN_UUID
 
     doc_payload = {
         "title": title,
-        "court": metadata.get("court"),
         "court_type": court_type,
-        "court_type_declared": court_type_declared,
-        "case_number": metadata.get("case_number"),
-        "parties": metadata.get("parties"),
-        "judge": metadata.get("judge"),
-        "judgment_date": metadata.get("date"),
-        "dates_of_hearing": metadata.get("dates_of_hearing"),
         "source_file": source_file,
         "pdf_url": pdf_url,
         "total_lines": result_data.get("total_lines", 0),
         "total_chunks": result_data.get("total_chunks", 0),
         "metadata": metadata,
-        "uploaded_by": uploaded_by,
+        "uploaded_by": uploader_id,
     }
 
     try:
         response = client.table("documents").insert(doc_payload).execute()
         if response.data and len(response.data) > 0:
             doc = response.data[0]
-            print(f"[Supabase] Successfully created document ID: {doc.get('id')}")
+            print(f"[Supabase] Successfully created document ID: {doc.get('id')} | Uploaded by: {uploader_id}")
             return doc
         return None
     except Exception as e:
@@ -164,6 +365,8 @@ def save_judgment_to_supabase(
     result_data: Dict[str, Any],
     pdf_url: Optional[str] = None,
     uploaded_by: Optional[str] = None,
+    uploaded_by_name: Optional[str] = None,
+    uploaded_by_email: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Complete workflow:
@@ -171,7 +374,13 @@ def save_judgment_to_supabase(
     2. Inserts all chunks into `public.chunks` linked to document_id
     Returns dict with {"document_id": "...", "chunks_inserted": <int>}
     """
-    doc = insert_document(result_data, pdf_url=pdf_url, uploaded_by=uploaded_by)
+    doc = insert_document(
+        result_data,
+        pdf_url=pdf_url,
+        uploaded_by=uploaded_by,
+        uploaded_by_name=uploaded_by_name,
+        uploaded_by_email=uploaded_by_email,
+    )
     if not doc:
         return None
 

@@ -9,7 +9,7 @@ const initialQueue: Job[] = [];
 
 export default function DocumentIngestion() {
   const [queue, setQueue] = useState<Job[]>(initialQueue);
-  const [saveToDb, setSaveToDb] = useState<boolean>(true);
+  const [saveToDb] = useState<boolean>(true);
   const filesRef = useState(() => new Map<number, { file: File; courtType: "SC" | "HC" }>())[0];
 
   const doneCount = queue.filter(
@@ -29,9 +29,16 @@ export default function DocumentIngestion() {
     formData.append("court_type", courtType);
     formData.append("court_type_declared", courtType);
 
+    const token = localStorage.getItem("token") || localStorage.getItem("access_token") || localStorage.getItem("sb-access-token");
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     try {
       const response = await fetch("http://localhost:8000/api/upload-judgment", {
         method: "POST",
+        headers,
         body: formData,
       });
 

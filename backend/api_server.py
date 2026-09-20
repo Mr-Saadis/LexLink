@@ -29,22 +29,41 @@ import tempfile
 import json
 import uuid
 
-from fastapi import FastAPI, UploadFile, File, Form
+from typing import Optional
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from judgement_pipeline import process_pdf_stream
 from supabase_client import (
     is_supabase_configured,
     save_judgment_to_supabase,
     get_supabase_client,
+    authenticate_user,
+    register_user,
+    get_user_from_token,
 )
 from r2_client import (
     is_r2_configured,
     upload_file_to_r2,
 )
 
-app = FastAPI(title="LexLink Ingestion API")
+app = FastAPI(title="LexLink Ingestion & Auth API")
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "layman"  # 'layman' | 'lawyer'
+    license_no: Optional[str] = None
+    cnic: Optional[str] = None
 
 
 # Dev ke liye CORS open rakha hai (frontend Vite/CRA dev server alag port
@@ -73,6 +92,53 @@ async def health_check():
     }
 
 
+@app.post("/api/auth/signup")
+async def signup(req: SignupRequest):
+    """
+    Registers a public user (Layman / Lawyer) in Supabase auth.users & creates public.profiles.
+    """
+    auth_data = register_user(
+        email=req.email,
+        password=req.password,
+        name=req.name,
+        role=req.role,
+        license_no=req.license_no,
+        cnic=req.cnic,
+    )
+    if not auth_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration failed. Email may already be in use or invalid credentials.",
+        )
+    return auth_data
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    """
+    Authenticates user/admin with Supabase Auth and returns JWT token & user profile.
+    """
+    auth_data = authenticate_user(req.email, req.password)
+    if not auth_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+    return auth_data
+
+
+@app.get("/api/auth/me")
+async def get_current_user_profile(authorization: Optional[str] = Header(None)):
+    """
+    Validates JWT Bearer token and returns current user info.
+    """
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization header missing")
+    user = get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired JWT token")
+    return {"user": user}
+
 
 @app.get("/api/documents")
 async def list_documents(limit: int = 50, offset: int = 0):
@@ -99,8 +165,27 @@ async def upload_judgment(
     dry_run: str = Form(default="true"),
     court_type: str = Form(default="SC"),
     court_type_declared: str = Form(default=None),
-    uploaded_by: str = Form(default=None),
+    uploaded_by: Optional[str] = Form(default=None),
+    authorization: Optional[str] = Header(default=None),
 ):
+    # Determine user ID: check uploaded_by form field or decode from JWT Authorization header
+    user_id = uploaded_by
+    user_name = None
+    user_email = None
+    if not user_id and authorization:
+        user_info = get_user_from_token(authorization)
+        if user_info:
+            user_id = user_info.get("id")
+            user_name = user_info.get("name")
+            user_email = user_info.get("email")
+            print(f"[Upload Auth] Authenticated user from JWT: {user_name} ({user_email})")
+    elif user_id and authorization:
+        # uploaded_by passed directly, still try to get name/email from token
+        user_info = get_user_from_token(authorization)
+        if user_info:
+            user_name = user_info.get("name")
+            user_email = user_info.get("email")
+
     # Determine declared court type (defaults to "SC" if unspecified)
     declared_type = court_type_declared or court_type or "SC"
     declared_type = declared_type.strip().upper()
@@ -161,7 +246,9 @@ async def upload_judgment(
                             db_result = save_judgment_to_supabase(
                                 result_data=result,
                                 pdf_url=r2_pdf_url,
-                                uploaded_by=uploaded_by,
+                                uploaded_by=user_id,
+                                uploaded_by_name=user_name,
+                                uploaded_by_email=user_email,
                             )
                     else:
                         print("[Upload] Dry run mode active: skipping R2 and DB persistence.")
