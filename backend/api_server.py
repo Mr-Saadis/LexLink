@@ -6,21 +6,18 @@ already call kar raha hai:
 
     fetch("http://localhost:8000/api/upload-judgment", {
         method: "POST",
-        body: formData,   // fields: file, dry_run
+        body: formData,   // fields: file, dry_run, court_type
     })
 
 "Select Files" click karne pe -> handleFilesSelected -> processFileIngestion
 -> yeh endpoint hit hota hai -> judgement_pipeline.process_pdf_stream()
-STREAM hota hai (parsing -> extracting -> verifying -> final), taake
-frontend har stage pe UI update kar sake -> full chunked result JSON
-disk pe save hota hai (CHUNK_OUTPUT_FOLDER me) -> aakhri "final" event
-frontend ko milta hai jahan se data.metadata.case_number queue card pe
-dikhaya jata hai.
+STREAM hota hai (parsing -> extracting -> verifying -> final) -> full chunked
+result JSON disk pe save hota hai -> BAAI/bge-m3 dense embeddings calculate
+hote hain -> Qdrant vector database me upsert hote hain -> Qdrant verification
+JSON save hota hai -> final event frontend ko milta hai.
 
 Run karne ke liye:
-    pip install fastapi uvicorn python-multipart pymupdf
-    python3 api_server.py
-    # ya: uvicorn api_server:app --reload --port 8000
+    uvicorn api_server:app --reload --port 8000
 """
 
 import os
@@ -28,11 +25,11 @@ import shutil
 import tempfile
 import json
 import uuid
-
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, status
+
+from fastapi import FastAPI, UploadFile, File, Form, Query, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 
 from judgement_pipeline import process_pdf_stream
@@ -47,6 +44,13 @@ from supabase_client import (
 from r2_client import (
     is_r2_configured,
     upload_file_to_r2,
+)
+from qdrant_manager import (
+    get_qdrant_status,
+    upsert_judgment_chunks,
+    export_collection_to_json,
+    search_similar_chunks,
+    get_embedding_dimension,
 )
 
 app = FastAPI(title="LexLink Ingestion & Auth API")
@@ -66,29 +70,73 @@ class SignupRequest(BaseModel):
     cnic: Optional[str] = None
 
 
-# Dev ke liye CORS open rakha hai (frontend Vite/CRA dev server alag port
-# pe chalta hai, e.g. localhost:5173, jab backend localhost:8000 pe hai).
-# Production me isko apne actual frontend domain tak restrict karna.
+class SearchQueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    court_type: Optional[str] = None
+    document_id: Optional[str] = None
+
+
+# Dev ke liye CORS open rakha hai (frontend Vite dev server alag port
+# pe chalta hai, e.g. localhost:5173).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Har upload ka chunked JSON yahan save hoga (backend folder ke andar,
-# api_server.py ke sath hi). Folder khud-b-khud ban jayega agar exist
-# nahi karta.
+# Folder setup for JSON caching & Qdrant verification JSONs
 CHUNK_OUTPUT_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chunked_output")
+QDRANT_OUTPUT_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qdrant_output")
 os.makedirs(CHUNK_OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(QDRANT_OUTPUT_FOLDER, exist_ok=True)
 
 
 @app.get("/api/health")
 async def health_check():
+    q_status = get_qdrant_status()
     return {
         "status": "online",
         "supabase_connected": is_supabase_configured(),
         "cloudflare_r2_connected": is_r2_configured(),
+        "qdrant": q_status,
+    }
+
+
+@app.get("/api/qdrant/status")
+async def qdrant_status_endpoint():
+    """Returns current Qdrant connection status, vector dimension, and indexed points count."""
+    return get_qdrant_status()
+
+
+@app.get("/api/qdrant/export")
+async def qdrant_export_endpoint(include_full_vectors: bool = False, limit: int = 500):
+    """Exports and returns current Qdrant collection points as structured JSON for inspection."""
+    dump_filename = f"qdrant_dump_{uuid.uuid4().hex[:8]}.json"
+    dump_path = os.path.join(QDRANT_OUTPUT_FOLDER, dump_filename)
+    data = export_collection_to_json(
+        output_path=dump_path,
+        limit=limit,
+        include_full_vectors=include_full_vectors,
+    )
+    return data
+
+
+@app.post("/api/qdrant/search")
+async def qdrant_search_endpoint(req: SearchQueryRequest):
+    """Executes dense vector semantic search against Qdrant collection using BAAI/bge-m3."""
+    results = search_similar_chunks(
+        query=req.query,
+        top_k=req.top_k,
+        court_type=req.court_type,
+        document_id=req.document_id,
+    )
+    return {
+        "query": req.query,
+        "results_count": len(results),
+        "results": results,
     }
 
 
@@ -167,6 +215,7 @@ async def upload_judgment(
     court_type_declared: str = Form(default=None),
     uploaded_by: Optional[str] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
+    embed_qdrant: str = Form(default="true"),
 ):
     # Determine user ID: check uploaded_by form field or decode from JWT Authorization header
     user_id = uploaded_by
@@ -192,9 +241,6 @@ async def upload_judgment(
     if declared_type not in ("SC", "HC"):
         declared_type = "SC" if "supreme" in declared_type.lower() else "HC"
 
-    # Uploaded file ko disk pe temp location par save karna zaroori hai
-    # kyunke PyMuPDF (fitz) file PATH se open karta hai, in-memory bytes
-    # se seedha nahi.
     orig_filename = file.filename or "uploaded.pdf"
     suffix = os.path.splitext(orig_filename)[1] or ".pdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -220,18 +266,18 @@ async def upload_judgment(
                     result = event["data"]
                     result["source_file"] = orig_filename
 
-                    # Save JSON to disk for caching & verification
+                    # 1. Save standard chunked JSON to disk
                     out_name = f"{uuid.uuid4()}.json"
                     out_path = os.path.join(CHUNK_OUTPUT_FOLDER, out_name)
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(result, f, ensure_ascii=False, indent=2)
 
-                    # Upload to Cloudflare R2 and persist to Supabase
                     db_result = None
+                    doc_id = None
                     r2_pdf_url = None
 
                     if dry_run.lower() != "true":
-                        # 1. Upload original PDF to Cloudflare R2 if configured
+                        # 2. Upload original PDF to Cloudflare R2 if configured
                         if is_r2_configured():
                             object_key = f"judgments/{uuid.uuid4()}_{orig_filename}"
                             print(f"[Upload] Uploading PDF '{orig_filename}' to Cloudflare R2: {object_key}...")
@@ -240,7 +286,7 @@ async def upload_judgment(
                         else:
                             print("[Upload] Cloudflare R2 is not configured. Skipping R2 upload.")
 
-                        # 2. Persist to Supabase Database
+                        # 3. Persist to Supabase Database
                         if is_supabase_configured():
                             print(f"[Upload] Persisting judgment '{orig_filename}' to Supabase...")
                             db_result = save_judgment_to_supabase(
@@ -250,8 +296,21 @@ async def upload_judgment(
                                 uploaded_by_name=user_name,
                                 uploaded_by_email=user_email,
                             )
+                            if db_result:
+                                doc_id = db_result.get("document_id")
                     else:
                         print("[Upload] Dry run mode active: skipping R2 and DB persistence.")
+
+                    # 4. Qdrant Vector Embedding & Verification JSON Generation
+                    qdrant_res = None
+                    if embed_qdrant.lower() != "false" and result.get("chunks"):
+                        qdrant_res = upsert_judgment_chunks(
+                            result_data=result,
+                            document_id=doc_id,
+                            save_json_file=True,
+                            output_dir=QDRANT_OUTPUT_FOLDER,
+                            include_full_vectors_in_json=True,
+                        )
 
                     final_payload = {
                         "type": "final",
@@ -264,8 +323,14 @@ async def upload_judgment(
                         "json_saved_to": out_path,
                         "pdf_url": r2_pdf_url,
                         "db_persisted": bool(db_result),
-                        "document_id": db_result.get("document_id") if db_result else None,
+                        "document_id": doc_id,
                         "chunks_saved": db_result.get("total_chunks_saved") if db_result else 0,
+                        "qdrant_embedded": bool(qdrant_res and qdrant_res.get("success")),
+                        "qdrant_points_count": qdrant_res.get("points_upserted", 0) if qdrant_res else 0,
+                        "qdrant_mode": qdrant_res.get("qdrant_mode") if qdrant_res else None,
+                        "qdrant_json_saved_to": qdrant_res.get("qdrant_json_path") if qdrant_res else None,
+                        "vector_dimension": qdrant_res.get("vector_dimension", get_embedding_dimension()) if qdrant_res else None,
+                        "embedding_model": qdrant_res.get("embedding_model") if qdrant_res else None,
                     }
                     yield json.dumps(final_payload) + "\n"
         finally:
