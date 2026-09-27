@@ -10,3 +10,5 @@ sentence-transformers>=3.0.0
 torch>=2.0.0
 tqdm>=4.66.0
 numpy>=1.26.0
+celery>=5.4.0
+redis>=5.0.0
