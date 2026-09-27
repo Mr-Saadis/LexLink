@@ -21,8 +21,17 @@ interface AuthModalProps {
 }
 
 export default function AuthModal({ onAdminLogin }: AuthModalProps) {
-  const { isAuthModalOpen, setIsAuthModalOpen, login, signup, error, isLoading, user, logout } = useAuth();
-  
+  const {
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+    login,
+    signup,
+    error,
+    isLoading,
+    user,
+    logout,
+  } = useAuth();
+
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [role, setRole] = useState<"layman" | "lawyer">("layman");
 
@@ -37,25 +46,60 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     if (!email || !password) return;
+
     const loggedUser = await login(email, password);
-    if (loggedUser && (loggedUser.role === "admin" || email.toLowerCase().includes("admin"))) {
-      if (onAdminLogin) onAdminLogin();
+
+    if (
+      loggedUser &&
+      (loggedUser.role === "admin" ||
+        email.toLowerCase().includes("admin"))
+    ) {
+      if (onAdminLogin) {
+        onAdminLogin();
+      }
     }
   };
 
   const handleSignupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     if (!email || !password || !name) return;
 
+    // Lawyer must provide CNIC
+    if (role === "lawyer" && !cnic.trim()) {
+      return;
+    }
+
     await signup({
-      email,
+      email: email.trim(),
       password,
-      name,
+      name: name.trim(),
       role,
-      license_no: role === "lawyer" ? licenseNo : undefined,
-      cnic: role === "lawyer" ? cnic : undefined,
+
+      // Bar license is optional
+      license_no:
+        role === "lawyer" && licenseNo.trim()
+          ? licenseNo.trim()
+          : undefined,
+
+      // CNIC is required only for lawyer
+      cnic:
+        role === "lawyer" && cnic.trim()
+          ? cnic.trim()
+          : undefined,
     });
+  };
+
+  const handleRoleChange = (newRole: "layman" | "lawyer") => {
+    setRole(newRole);
+
+    // Clear lawyer-only fields when switching to layman
+    if (newRole === "layman") {
+      setLicenseNo("");
+      setCnic("");
+    }
   };
 
   return (
@@ -65,7 +109,10 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
         style={{ borderColor: BORDER }}
       >
         {/* Header */}
-        <div className="px-6 py-4 text-white flex items-center justify-between shrink-0" style={{ background: NAVY }}>
+        <div
+          className="px-6 py-4 text-white flex items-center justify-between shrink-0"
+          style={{ background: NAVY }}
+        >
           <div className="flex items-center gap-3">
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center"
@@ -73,13 +120,18 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
             >
               <Scale size={18} color="#fff" />
             </div>
+
             <div>
-              <h2 className="text-base font-semibold font-serif tracking-wide">LexLink Authentication</h2>
+              <h2 className="text-base font-semibold font-serif tracking-wide">
+                LexLink Authentication
+              </h2>
+
               <p className="text-[11px] text-emerald-200/80">
                 Unified Legal Intelligence & Research Portal
               </p>
             </div>
           </div>
+
           <button
             onClick={() => setIsAuthModalOpen(false)}
             className="p-1.5 rounded-lg hover:bg-white/10 text-emerald-200 hover:text-white transition-colors"
@@ -99,16 +151,29 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
               >
                 <CheckCircle2 size={32} color={GREEN} />
               </div>
-              <h3 className="text-base font-semibold" style={{ color: TEXT }}>
+
+              <h3
+                className="text-base font-semibold"
+                style={{ color: TEXT }}
+              >
                 {user.name || "Authenticated User"}
               </h3>
-              <p className="text-xs text-slate-500 font-mono mt-0.5">{user.email}</p>
-              
+
+              <p className="text-xs text-slate-500 font-mono mt-0.5">
+                {user.email}
+              </p>
+
               <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
                 <Shield size={13} />
-                <span>Role: {user.role?.toUpperCase() || "USER"}</span>
+
+                <span>
+                  Role: {user.role?.toUpperCase() || "USER"}
+                </span>
+
                 {user.verification_status && (
-                  <span className="text-[10px] opacity-75 font-normal">({user.verification_status})</span>
+                  <span className="text-[10px] opacity-75 font-normal">
+                    ({user.verification_status})
+                  </span>
                 )}
               </div>
 
@@ -121,6 +186,7 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                 >
                   Continue
                 </button>
+
                 <button
                   type="button"
                   onClick={logout}
@@ -146,6 +212,7 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                 >
                   Sign In
                 </button>
+
                 <button
                   type="button"
                   onClick={() => setTab("signup")}
@@ -159,137 +226,39 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                 </button>
               </div>
 
+              {/* Error */}
               {error && (
                 <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs mb-4">
-                  <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
+                  <AlertCircle
+                    size={16}
+                    className="shrink-0 mt-0.5 text-red-500"
+                  />
+
                   <span>{error}</span>
                 </div>
               )}
 
               {tab === "login" ? (
                 /* LOGIN FORM */
-                <form onSubmit={handleLoginSubmit} className="space-y-4">
+                <form
+                  onSubmit={handleLoginSubmit}
+                  className="space-y-4"
+                >
+                  {/* Email */}
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: MUTED }}>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1.5"
+                      style={{ color: MUTED }}
+                    >
                       Email Address
                     </label>
+
                     <div
                       className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
                       style={{ borderColor: BORDER }}
                     >
                       <Mail size={16} color={MUTED} />
-                      <input
-                        type="email"
-                        required
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="you@domain.com"
-                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
-                      />
-                    </div>
-                  </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: MUTED }}>
-                      Password
-                    </label>
-                    <div
-                      className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
-                      style={{ borderColor: BORDER }}
-                    >
-                      <Lock size={16} color={MUTED} />
-                      <input
-                        type="password"
-                        required
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="••••••••••••"
-                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="w-full mt-3 py-3 rounded-xl text-xs font-semibold text-white flex items-center justify-center gap-2 shadow-md hover:brightness-105 active:scale-[0.99] disabled:opacity-60 transition-all"
-                    style={{ background: NAVY }}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 size={15} className="animate-spin" />
-                        Signing in...
-                      </>
-                    ) : (
-                      "Sign In"
-                    )}
-                  </button>
-                </form>
-              ) : (
-                /* SIGNUP FORM */
-                <form onSubmit={handleSignupSubmit} className="space-y-3.5">
-                  {/* Role Selector Grid */}
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: MUTED }}>
-                      Select Profile Role
-                    </label>
-                    <div className="grid grid-cols-2 gap-3">
-                      {[
-                        { id: "layman", label: "Layman (Public User)", icon: UserIcon },
-                        { id: "lawyer", label: "Lawyer / Advocate", icon: Briefcase },
-                      ].map((item) => {
-                        const Icon = item.icon;
-                        const active = role === item.id;
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onClick={() => setRole(item.id as any)}
-                            className={`flex flex-col items-center justify-center py-3 px-2 rounded-xl border text-center transition-all ${
-                              active
-                                ? "border-emerald-600 bg-emerald-50 text-emerald-800 font-semibold ring-1 ring-emerald-600 shadow-sm"
-                                : "border-slate-200 bg-slate-50/50 text-slate-600 hover:bg-slate-100"
-                            }`}
-                          >
-                            <Icon size={20} className={active ? "text-emerald-700" : "text-slate-500"} />
-                            <span className="text-xs mt-1.5">{item.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Full Name */}
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
-                      Full Name
-                    </label>
-                    <div
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
-                      style={{ borderColor: BORDER }}
-                    >
-                      <UserIcon size={15} color={MUTED} />
-                      <input
-                        type="text"
-                        required
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        placeholder="e.g. Barrister Ali Khan"
-                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Email */}
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
-                      Email Address
-                    </label>
-                    <div
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
-                      style={{ borderColor: BORDER }}
-                    >
-                      <Mail size={15} color={MUTED} />
                       <input
                         type="email"
                         required
@@ -303,14 +272,19 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
 
                   {/* Password */}
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1.5"
+                      style={{ color: MUTED }}
+                    >
                       Password
                     </label>
+
                     <div
-                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
+                      className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
                       style={{ borderColor: BORDER }}
                     >
-                      <Lock size={15} color={MUTED} />
+                      <Lock size={16} color={MUTED} />
+
                       <input
                         type="password"
                         required
@@ -322,42 +296,226 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                     </div>
                   </div>
 
-                  {/* Conditional Role Fields (From DB Schema) */}
+                  {/* Login Button */}
+                  <button
+                    type="submit"
+                    disabled={isLoading}
+                    className="w-full mt-3 py-3 rounded-xl text-xs font-semibold text-white flex items-center justify-center gap-2 shadow-md hover:brightness-105 active:scale-[0.99] disabled:opacity-60 transition-all"
+                    style={{ background: NAVY }}
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2
+                          size={15}
+                          className="animate-spin"
+                        />
+                        Signing in...
+                      </>
+                    ) : (
+                      "Sign In"
+                    )}
+                  </button>
+                </form>
+              ) : (
+                /* SIGNUP FORM */
+                <form
+                  onSubmit={handleSignupSubmit}
+                  className="space-y-3.5"
+                >
+                  {/* Role Selector */}
+                  <div>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1.5"
+                      style={{ color: MUTED }}
+                    >
+                      Select Profile Role
+                    </label>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        {
+                          id: "layman",
+                          label: "Layman (Public User)",
+                          icon: UserIcon,
+                        },
+                        {
+                          id: "lawyer",
+                          label: "Lawyer / Advocate",
+                          icon: Briefcase,
+                        },
+                      ].map((item) => {
+                        const Icon = item.icon;
+                        const active = role === item.id;
+
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() =>
+                              handleRoleChange(
+                                item.id as "layman" | "lawyer"
+                              )
+                            }
+                            className={`flex flex-col items-center justify-center py-3 px-2 rounded-xl border text-center transition-all ${
+                              active
+                                ? "border-emerald-600 bg-emerald-50 text-emerald-800 font-semibold ring-1 ring-emerald-600 shadow-sm"
+                                : "border-slate-200 bg-slate-50/50 text-slate-600 hover:bg-slate-100"
+                            }`}
+                          >
+                            <Icon
+                              size={20}
+                              className={
+                                active
+                                  ? "text-emerald-700"
+                                  : "text-slate-500"
+                              }
+                            />
+
+                            <span className="text-xs mt-1.5">
+                              {item.label}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Full Name */}
+                  <div>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1"
+                      style={{ color: MUTED }}
+                    >
+                      Full Name
+                    </label>
+
+                    <div
+                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
+                      style={{ borderColor: BORDER }}
+                    >
+                      <UserIcon size={15} color={MUTED} />
+
+                      <input
+                        type="text"
+                        required
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="e.g. Barrister Ali Khan"
+                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Email */}
+                  <div>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1"
+                      style={{ color: MUTED }}
+                    >
+                      Email Address
+                    </label>
+
+                    <div
+                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
+                      style={{ borderColor: BORDER }}
+                    >
+                      <Mail size={15} color={MUTED} />
+
+                      <input
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@domain.com"
+                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Password */}
+                  <div>
+                    <label
+                      className="block text-xs font-semibold uppercase tracking-wider mb-1"
+                      style={{ color: MUTED }}
+                    >
+                      Password
+                    </label>
+
+                    <div
+                      className="flex items-center gap-2.5 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
+                      style={{ borderColor: BORDER }}
+                    >
+                      <Lock size={15} color={MUTED} />
+
+                      <input
+                        type="password"
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••••••"
+                        className="bg-transparent outline-none text-xs flex-1 text-slate-800 placeholder:text-slate-400"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Lawyer Fields */}
                   {role === "lawyer" && (
                     <div className="grid grid-cols-2 gap-2.5 pt-1">
+                      {/* Bar License - OPTIONAL */}
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
+                        <label
+                          className="block text-[11px] font-semibold uppercase tracking-wider mb-1"
+                          style={{ color: MUTED }}
+                        >
                           Bar License No
+                          <span className="ml-1 text-slate-400 font-normal normal-case">
+                            (Optional)
+                          </span>
                         </label>
+
                         <div
                           className="flex items-center gap-2 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
                           style={{ borderColor: BORDER }}
                         >
                           <FileBadge size={14} color={MUTED} />
+
                           <input
                             type="text"
-                            required
                             value={licenseNo}
-                            onChange={(e) => setLicenseNo(e.target.value)}
+                            onChange={(e) =>
+                              setLicenseNo(e.target.value)
+                            }
                             placeholder="LHC-12345"
                             className="bg-transparent outline-none text-xs flex-1"
                           />
                         </div>
                       </div>
+
+                      {/* CNIC - REQUIRED */}
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1" style={{ color: MUTED }}>
+                        <label
+                          className="block text-[11px] font-semibold uppercase tracking-wider mb-1"
+                          style={{ color: MUTED }}
+                        >
                           CNIC Number
+                          <span className="ml-1 text-red-500">
+                            *
+                          </span>
                         </label>
+
                         <div
                           className="flex items-center gap-2 px-3 py-2 rounded-xl border bg-slate-50/60 focus-within:bg-white focus-within:border-emerald-500 transition-all"
                           style={{ borderColor: BORDER }}
                         >
                           <CreditCard size={14} color={MUTED} />
+
                           <input
                             type="text"
                             required
                             value={cnic}
-                            onChange={(e) => setCnic(e.target.value)}
+                            onChange={(e) =>
+                              setCnic(e.target.value)
+                            }
                             placeholder="35201-xxxxxxx-x"
                             className="bg-transparent outline-none text-xs flex-1"
                           />
@@ -366,6 +524,7 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                     </div>
                   )}
 
+                  {/* Signup Button */}
                   <button
                     type="submit"
                     disabled={isLoading}
@@ -374,7 +533,10 @@ export default function AuthModal({ onAdminLogin }: AuthModalProps) {
                   >
                     {isLoading ? (
                       <>
-                        <Loader2 size={15} className="animate-spin" />
+                        <Loader2
+                          size={15}
+                          className="animate-spin"
+                        />
                         Creating Account...
                       </>
                     ) : (
