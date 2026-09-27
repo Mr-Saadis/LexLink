@@ -20,9 +20,9 @@ export default function BatchProgressCard({ doneCount, totalCount, onResume }: B
           Batch Progress
         </p>
         <div className="flex items-center gap-2 mt-1">
-          <div className="rounded-full h-1.5 w-24" style={{ background: BORDER }}>
+          <div className="rounded-full h-1.5 w-24 overflow-hidden" style={{ background: BORDER }}>
             <div
-              className="h-1.5 rounded-full"
+              className="h-1.5 rounded-full transition-all duration-300 ease-out"
               style={{ width: `${pct}%`, background: GREEN }}
             />
           </div>
@@ -33,7 +33,7 @@ export default function BatchProgressCard({ doneCount, totalCount, onResume }: B
       </div>
       <button
         onClick={onResume}
-        className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white"
+        className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-transform duration-150 hover:opacity-90 active:scale-[0.98]"
         style={{ background: GREEN }}
       >
         <Play size={14} fill="#fff" /> Resume Batch

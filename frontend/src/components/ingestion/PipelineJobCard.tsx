@@ -12,6 +12,7 @@ export interface Job {
   meta: string;
   stageIndex: number;
   status: JobStatus;
+  courtType?: "SC" | "HC";
   error?: string;
 }
 
@@ -23,7 +24,10 @@ interface PipelineJobCardProps {
 
 export default function PipelineJobCard({ job, onRetry, onIgnore }: PipelineJobCardProps) {
   return (
-    <div className="rounded-lg border p-4" style={{ borderColor: BORDER }}>
+    <div
+      className="rounded-lg border p-4 transition-shadow duration-150 hover:shadow-sm"
+      style={{ borderColor: BORDER, background: "#fff" }}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-2 min-w-0">
           {job.status === "failed" ? (
@@ -34,12 +38,19 @@ export default function PipelineJobCard({ job, onRetry, onIgnore }: PipelineJobC
             <FileText size={16} color={MUTED} className="mt-0.5 shrink-0" />
           )}
           <div className="min-w-0">
-            <p
-              className="text-sm font-medium truncate"
-              style={{ color: job.status === "failed" ? RED : TEXT }}
-            >
-              {job.name}
-            </p>
+            <div className="flex items-center gap-1.5">
+              {job.courtType && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 shrink-0">
+                  {job.courtType}
+                </span>
+              )}
+              <p
+                className="text-sm font-medium truncate"
+                style={{ color: job.status === "failed" ? RED : TEXT }}
+              >
+                {job.name}
+              </p>
+            </div>
             <p className="text-[11px]" style={{ color: MUTED }}>
               {job.meta}
             </p>
