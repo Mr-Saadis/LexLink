@@ -64,7 +64,7 @@ class SignupRequest(BaseModel):
     name: str
     role: str = "layman"  # 'layman' | 'lawyer' | 'admin'
     license_no: Optional[str] = None
-    cnic: Optional[str] = None
+    cnic: str
 
 
 class SearchQueryRequest(BaseModel):
