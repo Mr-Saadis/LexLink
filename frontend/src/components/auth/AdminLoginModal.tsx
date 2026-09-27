@@ -1,20 +1,30 @@
 import React, { useState } from "react";
 import { useAuth } from "../../context/AuthContext";
-import { X, Lock, Mail, Shield, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { X, Lock, Mail, Shield, CheckCircle2, AlertCircle, Loader2, ShieldAlert } from "lucide-react";
 import { NAVY, GREEN, BORDER, TEXT, MUTED, BG } from "../../theme/theme";
 
 export default function AdminLoginModal() {
   const { isAuthModalOpen, setIsAuthModalOpen, login, error, isLoading, user, logout } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
 
   if (!isAuthModalOpen) return null;
 
+  const isAdmin = user?.role === "admin";
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLocalError(null);
     if (!email || !password) return;
-    await login(email, password);
+    const loggedUser = await login(email, password);
+    if (loggedUser && loggedUser.role !== "admin") {
+      setLocalError("Access Denied: This portal strictly requires administrator privileges. Your account role is '" + (loggedUser.role || "layman") + "'.");
+      logout();
+    }
   };
+
+  const activeError = localError || error;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
@@ -46,8 +56,8 @@ export default function AdminLoginModal() {
 
         {/* Content */}
         <div className="p-6">
-          {user ? (
-            /* Logged-In State */
+          {user && isAdmin ? (
+            /* Logged-In As Admin State */
             <div className="text-center py-4">
               <div
                 className="w-14 h-14 mx-auto rounded-full flex items-center justify-center mb-3"
@@ -56,13 +66,13 @@ export default function AdminLoginModal() {
                 <CheckCircle2 size={28} color={GREEN} />
               </div>
               <h3 className="text-sm font-semibold" style={{ color: TEXT }}>
-                Authenticated as Admin
+                Authenticated as Administrator
               </h3>
               <p className="text-xs mt-1 font-mono text-emerald-800 bg-emerald-50 py-1 px-3 rounded-md inline-block border border-emerald-200">
                 {user.email}
               </p>
               <p className="text-[11px] text-slate-500 mt-2">
-                All document uploads will automatically be linked to your User ID in Supabase.
+                All document uploads and system actions are authenticated as Admin.
               </p>
 
               <div className="mt-6 flex gap-3">
@@ -83,13 +93,51 @@ export default function AdminLoginModal() {
                 </button>
               </div>
             </div>
+          ) : user && !isAdmin ? (
+            /* Logged-In As Non-Admin State: Enforce Denial */
+            <div className="text-center py-4">
+              <div
+                className="w-14 h-14 mx-auto rounded-full flex items-center justify-center mb-3 bg-amber-50"
+              >
+                <ShieldAlert size={28} className="text-amber-600" />
+              </div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Administrator Privileges Required
+              </h3>
+              <p className="text-xs mt-1 text-slate-600">
+                You are currently signed in as <strong className="uppercase text-slate-800">{user.role || "standard user"}</strong> ({user.email}).
+              </p>
+              <div className="mt-3 p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800 text-left">
+                The Admin Console requires an account with verified <code>role: "admin"</code>. Please sign in with administrator credentials.
+              </div>
+
+              <div className="mt-6 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    logout();
+                  }}
+                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold text-white shadow-sm transition-all"
+                  style={{ background: NAVY }}
+                >
+                  Sign In with Admin Account
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAuthModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
           ) : (
             /* Login Form */
             <form onSubmit={handleSubmit} className="space-y-4">
-              {error && (
+              {activeError && (
                 <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs">
                   <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
-                  <span>{error}</span>
+                  <span>{activeError}</span>
                 </div>
               )}
 
@@ -154,7 +202,7 @@ export default function AdminLoginModal() {
 
               <div className="pt-2 text-center">
                 <p className="text-[11px] text-slate-400">
-                  Secured by Supabase JWT & Role-Based Access
+                  Secured by Supabase JWT & Role-Based Access Control
                 </p>
               </div>
             </form>

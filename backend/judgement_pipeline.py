@@ -336,8 +336,7 @@ def extract_metadata(full_text_first_page, lines, declared_court_type="SC"):
 
     meta = {
         "court": None,
-        "court_type": None,
-        "court_type_declared": decl,
+        "declared_court_type": decl,
         "case_number": None,
         "parties": None,
         "judge": None,
@@ -355,10 +354,8 @@ def extract_metadata(full_text_first_page, lines, declared_court_type="SC"):
         elif "high court" in c_lower or "tribunal" in c_lower:
             auto_court_type = "HC"
 
-    # Fallback to declared_court_type if automatic extraction cannot determine court_type
     final_court_type = auto_court_type or decl
-    meta["court_type"] = final_court_type
-    meta["court_type_declared"] = decl
+    meta["declared_court_type"] = decl
 
     # If court name was not detected from text, provide a sensible default name
     if not meta["court"]:

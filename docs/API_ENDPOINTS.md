@@ -19,49 +19,81 @@ Content-Type: application/json
 
 | Method | Endpoint | Access | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/auth/signup` | Public | Register new user account (default `layman`). |
-| `POST` | `/api/auth/login` | Public | Authenticate credentials; returns access & refresh tokens. |
-| `POST` | `/api/auth/refresh` | Public | Rotate refresh token and issue new access token. |
-| `GET`  | `/api/auth/me` | Authenticated | Retrieve current user profile, role, and verification status. |
-| `POST` | `/api/auth/verify-role`| Authenticated | Submit credentials (Bar ID / Student Card) for role upgrade. |
+| `POST` | `/api/auth/signup` | Public | Register new user account (default `layman` or `lawyer`). Passwords hashed with bcrypt. |
+| `POST` | `/api/auth/login` | Public | Authenticate credentials; returns signed JWT bearer token and user profile. |
+| `GET`  | `/api/auth/me` | Authenticated | Retrieve current user profile, role, and verification status via Bearer JWT. |
 
 ---
 
 ## 2. Document Ingestion & Management (`/api/documents`)
 
-### `POST /api/documents/upload` (or `/api/upload-judgment`)
-- **Access:** Student, Lawyer, Admin
+### `POST /api/upload-judgment` (or `/api/documents/upload`)
+- **Access:** Authenticated (Student, Lawyer, Admin) — `Authorization: Bearer <token>` required.
 - **Content-Type:** `multipart/form-data`
-- **Body:** `file: Binary PDF`, `dry_run: boolean` (default: `true`), `court_type: "SC" | "HC"` (default: `"SC"`), `court_type_declared: "SC" | "HC"`
+- **Body:**
+  - `file: Binary PDF` (Required)
+  - `dry_run: boolean` (default: `true`)
+  - `declared_court_type: "SC" | "HC"` (default: `"SC"`)
+  - `embed_qdrant: boolean` (default: `true`)
+- **Security:** Uploader identity is derived strictly from the verified JWT session token. Spoofing is prevented.
 - **Response:** Streaming `application/x-ndjson`
   ```json
-  {"type": "progress", "stage_index": 0, "stage_name": "Upload"}
-  {"type": "progress", "stage_index": 1, "stage_name": "Parse & Extract"}
-  {"type": "progress", "stage_index": 2, "stage_name": "Chunk & Embed"}
-  {"type": "final", "success": true, "metadata": {"case_number": "SC-12/2022", "court": "SUPREME COURT OF PAKISTAN", "court_type": "SC", "court_type_declared": "SC"}, "total_chunks": 38, "json_saved_to": "..."}
+  {"type": "progress", "stage_index": 1, "stage_name": "parsing"}
+  {"type": "progress", "stage_index": 2, "stage_name": "chunking"}
+  {"type": "progress", "stage_index": 3, "stage_name": "verifying"}
+  {"type": "final", "success": true, "metadata": {"case_number": "SC-12/2022", "court": "SUPREME COURT OF PAKISTAN", "declared_court_type": "SC"}, "total_chunks": 38, "json_saved_to": "...", "db_persisted": true, "qdrant_embedded": true}
   ```
 
 ### `GET /api/documents`
-- **Access:** Student, Lawyer, Admin
-- **Query Params:** `page=1`, `limit=20`, `court=Supreme+Court`, `search=tenancy`
+- **Access:** Authenticated Users (`Authorization: Bearer <token>`)
+- **Query Params:** `limit=50`, `offset=0`
 - **Response:**
   ```json
   {
-    "total": 120,
-    "page": 1,
-    "items": [
+    "documents": [
       {
         "id": "uuid",
-        "title": "Muhammad vs. Federation of Pakistan",
-        "case_number": "SC-490/2021",
-        "court": "Supreme Court",
-        "total_pages": 14,
-        "status": "indexed",
-        "created_at": "2026-08-23T10:00:00Z"
+        "title": "SC-12/2022 - Federation of Pakistan vs. Tariq",
+        "court_type": "SC",
+        "total_lines": 350,
+        "total_chunks": 38,
+        "source_file": "judgment_12_2022.pdf",
+        "pdf_url": "https://r2.lexlink.pk/judgments/...",
+        "created_at": "2026-09-27T10:00:00Z",
+        "uploaded_by": "00000000-0000-0000-0000-000000000001"
       }
     ]
   }
   ```
+
+### `GET /api/stats`
+- **Access:** Public / Authenticated
+- **Response:**
+  ```json
+  {
+    "status": "online",
+    "documents_count": 42,
+    "chunks_count": 890,
+    "qdrant_points_count": 890,
+    "qdrant_status": "online",
+    "qdrant_connected": true,
+    "supabase_connected": true,
+    "cloudflare_r2_connected": true,
+    "vector_dimension": 1024,
+    "embedding_model": "BAAI/bge-m3",
+    "recent_documents": [...]
+  }
+  ```
+
+---
+
+## 3. Qdrant Vector Engine & Verification (`/api/qdrant`)
+
+| Method | Endpoint | Access | Description |
+| :--- | :--- | :--- | :--- |
+| `GET`  | `/api/qdrant/status` | Public / Authenticated | Returns Qdrant cluster status, vector dimension, and indexed point count. |
+| `GET`  | `/api/qdrant/export` | **Admin Only** | Generates and returns structured JSON dump of points in `qdrant_output/`. |
+| `POST` | `/api/qdrant/search` | Authenticated | Executes 1024-dim dense semantic vector similarity search via BAAI/bge-m3. |
 
 ---
 

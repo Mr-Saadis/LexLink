@@ -62,22 +62,11 @@ When building the UI, organize your files into these folders inside `src/`:
 4. Create the API call in `src/api/auth.ts`.
 
 ### Backend Structure (`backend/`)
-Right now, everything is in `api_server.py`. As it grows, it will become unmanageable. Use the **Router Pattern**:
+The backend is structured into clear Python service files:
 
-- `app/` (Create an `app` folder inside `backend`)
-  - `main.py` (Your entry point, previously `api_server.py`. Keep this small!)
-  - `routers/`
-    - **What goes here:** Different API routes (e.g., `users.py`, `documents.py`). 
-    - **How:** Use FastAPI's `APIRouter`.
-  - `models/`
-    - **What goes here:** Database models (e.g., SQLAlchemy or PyMongo classes).
-  - `schemas/`
-    - **What goes here:** Pydantic models for data validation (e.g., `UserCreate`, `DocumentResponse`).
-  - `services/`
-    - **What goes here:** The core business logic (e.g., PDF parsing logic using `PyMuPDF`).
-
-**Example Step-by-Step for a new "Upload PDF" API:**
-1. Add the route in `backend/app/routers/pdf.py` (`@router.post("/upload")`).
-2. Write the extraction logic in `backend/app/services/pdf_extractor.py`.
-3. Validate the response using a Pydantic schema in `backend/app/schemas/pdf.py`.
-4. Include the router in `backend/app/main.py` (`app.include_router(pdf.router)`).
+- `api_server.py`: FastAPI server containing REST endpoints, streaming upload pipeline, and authentication middleware.
+- `supabase_client.py`: Supabase database operations, JWT authentication, and bcrypt password verification.
+- `judgement_pipeline.py`: PDF text block parsing, boilerplate cleanup, and bounding box chunking.
+- `qdrant_manager.py`: BAAI/bge-m3 embedding calculations and Qdrant vector database indexing.
+- `r2_client.py`: Cloudflare R2 object storage client for original PDF archiving.
+- `seed_admin.py`: CLI tool for bootstrapping and provisioning Administrator accounts.

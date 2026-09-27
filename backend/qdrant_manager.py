@@ -56,26 +56,38 @@ _qdrant_client_mode = None  # "remote" or "embedded_disk"
 def get_embedding_model():
     """
     Returns the singleton SentenceTransformer instance.
-    Lazy-loads on first call.
+    Handles device selection and low_cpu_mem_usage=False to prevent meta tensor errors.
     """
     global _model_instance
     if _model_instance is not None:
         return _model_instance
 
-    from sentence_transformers import SentenceTransformer
+    try:
+        import torch
+        from sentence_transformers import SentenceTransformer
 
-    print(f"[EmbeddingEngine] Loading model '{EMBEDDING_MODEL_NAME}'...")
-    _model_instance = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    dim = _model_instance.get_sentence_embedding_dimension()
-    print(f"[EmbeddingEngine] Model '{EMBEDDING_MODEL_NAME}' loaded successfully (dimension={dim}).")
-    return _model_instance
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[EmbeddingEngine] Loading model '{EMBEDDING_MODEL_NAME}' on device '{device}'...")
+        _model_instance = SentenceTransformer(
+            EMBEDDING_MODEL_NAME,
+            device=device,
+            model_kwargs={"low_cpu_mem_usage": False},
+        )
+        dim = _model_instance.get_sentence_embedding_dimension()
+        print(f"[EmbeddingEngine] Model '{EMBEDDING_MODEL_NAME}' loaded successfully (dimension={dim}).")
+        return _model_instance
+    except Exception as e:
+        print(f"[EmbeddingEngine] Notice: Could not load embedding model '{EMBEDDING_MODEL_NAME}': {e}")
+        return None
 
 
 def get_embedding_dimension() -> int:
     """Returns the embedding vector dimension for the active model."""
     try:
         model = get_embedding_model()
-        return model.get_sentence_embedding_dimension()
+        if model:
+            return model.get_sentence_embedding_dimension()
+        return 1024
     except Exception:
         return 1024  # Default for BAAI/bge-m3
 
@@ -83,22 +95,30 @@ def get_embedding_dimension() -> int:
 def embed_texts(texts: List[str], batch_size: int = 32) -> List[List[float]]:
     """
     Computes normalized dense embeddings for a list of strings.
-    Returns list of float vectors.
+    Returns list of float vectors, or empty list if model unavailable.
     """
     if not texts:
         return []
 
     model = get_embedding_model()
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=len(texts) > 10,
-        normalize_embeddings=True,
-    )
+    if model is None:
+        print("[EmbeddingEngine] Embedding model is currently unavailable. Skipping vector generation.")
+        return []
 
-    if isinstance(embeddings, np.ndarray):
-        return embeddings.tolist()
-    return [list(vec) for vec in embeddings]
+    try:
+        embeddings = model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=len(texts) > 10,
+            normalize_embeddings=True,
+        )
+
+        if isinstance(embeddings, np.ndarray):
+            return embeddings.tolist()
+        return [list(vec) for vec in embeddings]
+    except Exception as e:
+        print(f"[EmbeddingEngine] Error calculating embeddings: {e}")
+        return []
 
 
 # ----------------------------------------------------------------------
@@ -297,6 +317,14 @@ def upsert_judgment_chunks(
     texts = [ch.get("text", "") for ch in chunks]
     print(f"[Qdrant] Embedding {len(texts)} chunk(s) using {EMBEDDING_MODEL_NAME}...")
     vectors = embed_texts(texts, batch_size=32)
+    if not vectors or len(vectors) != len(chunks):
+        print("[Qdrant] Notice: Dense vector generation skipped (model unavailable or storage limit reached).")
+        return {
+            "success": False,
+            "error": "Embedding vectors could not be generated",
+            "points_upserted": 0,
+            "qdrant_mode": get_qdrant_status().get("mode"),
+        }
 
     # 2. Build PointStruct list and JSON export structure
     points_to_upsert = []

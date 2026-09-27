@@ -1,22 +1,15 @@
 """
 LexLink - Upload API Server
 =============================
-Yeh wo backend hai jise tumhara React component (DocumentIngestion.tsx)
-already call kar raha hai:
+FastAPI backend handling:
+- PDF streaming extraction, chunking, and metadata parsing
+- BAAI/bge-m3 dense vector embeddings & Qdrant integration
+- Cloudflare R2 original PDF storage
+- Supabase persistence (documents & chunks)
+- JWT Bearer authentication and Role-Based Access Control (RBAC)
+- Live system metrics & stats
 
-    fetch("http://localhost:8000/api/upload-judgment", {
-        method: "POST",
-        body: formData,   // fields: file, dry_run, court_type
-    })
-
-"Select Files" click karne pe -> handleFilesSelected -> processFileIngestion
--> yeh endpoint hit hota hai -> judgement_pipeline.process_pdf_stream()
-STREAM hota hai (parsing -> extracting -> verifying -> final) -> full chunked
-result JSON disk pe save hota hai -> BAAI/bge-m3 dense embeddings calculate
-hote hain -> Qdrant vector database me upsert hote hain -> Qdrant verification
-JSON save hota hai -> final event frontend ko milta hai.
-
-Run karne ke liye:
+Run locally:
     uvicorn api_server:app --reload --port 8000
 """
 
@@ -27,9 +20,9 @@ import json
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, Query, Header, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from judgement_pipeline import process_pdf_stream
@@ -37,6 +30,7 @@ from supabase_client import (
     is_supabase_configured,
     save_judgment_to_supabase,
     get_supabase_client,
+    get_database_stats,
     authenticate_user,
     register_user,
     get_user_from_token,
@@ -56,6 +50,9 @@ from qdrant_manager import (
 app = FastAPI(title="LexLink Ingestion & Auth API")
 
 
+# ----------------------------------------------------------------------
+# Pydantic Schemas
+# ----------------------------------------------------------------------
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -65,7 +62,7 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     name: str
-    role: str = "layman"  # 'layman' | 'lawyer'
+    role: str = "layman"  # 'layman' | 'lawyer' | 'admin'
     license_no: Optional[str] = None
     cnic: Optional[str] = None
 
@@ -73,15 +70,27 @@ class SignupRequest(BaseModel):
 class SearchQueryRequest(BaseModel):
     query: str
     top_k: int = 5
+    declared_court_type: Optional[str] = None
     court_type: Optional[str] = None
     document_id: Optional[str] = None
 
 
-# Dev ke liye CORS open rakha hai (frontend Vite dev server alag port
-# pe chalta hai, e.g. localhost:5173).
+# ----------------------------------------------------------------------
+# CORS Configuration
+# ----------------------------------------------------------------------
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+env_origins = os.getenv("CORS_ORIGINS", "").strip()
+if env_origins:
+    ALLOWED_ORIGINS = [o.strip() for o in env_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,6 +103,9 @@ os.makedirs(CHUNK_OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(QDRANT_OUTPUT_FOLDER, exist_ok=True)
 
 
+# ----------------------------------------------------------------------
+# System & Health Endpoints
+# ----------------------------------------------------------------------
 @app.get("/api/health")
 async def health_check():
     q_status = get_qdrant_status()
@@ -105,15 +117,64 @@ async def health_check():
     }
 
 
+@app.get("/api/stats")
+async def get_system_stats():
+    """
+    Returns live aggregated statistics from Supabase database, Qdrant vector index, and R2.
+    """
+    db_stats = get_database_stats()
+    q_status = get_qdrant_status()
+    return {
+        "status": "online",
+        "documents_count": db_stats.get("documents_count", 0),
+        "chunks_count": db_stats.get("chunks_count", 0),
+        "recent_documents": db_stats.get("recent_documents", []),
+        "qdrant_points_count": q_status.get("points_count", 0),
+        "qdrant_status": q_status.get("status", "unknown"),
+        "qdrant_connected": q_status.get("connected", False),
+        "supabase_connected": is_supabase_configured(),
+        "cloudflare_r2_connected": is_r2_configured(),
+        "vector_dimension": q_status.get("vector_dimension", 1024),
+        "embedding_model": q_status.get("embedding_model", "BAAI/bge-m3"),
+    }
+
+
+# ----------------------------------------------------------------------
+# Qdrant Vector Endpoints
+# ----------------------------------------------------------------------
 @app.get("/api/qdrant/status")
-async def qdrant_status_endpoint():
+async def qdrant_status_endpoint(authorization: Optional[str] = Header(None)):
     """Returns current Qdrant connection status, vector dimension, and indexed points count."""
     return get_qdrant_status()
 
 
 @app.get("/api/qdrant/export")
-async def qdrant_export_endpoint(include_full_vectors: bool = False, limit: int = 500):
-    """Exports and returns current Qdrant collection points as structured JSON for inspection."""
+async def qdrant_export_endpoint(
+    include_full_vectors: bool = False,
+    limit: int = 500,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Exports current Qdrant collection points as structured JSON for inspection.
+    Restricted strictly to administrators.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to export vector data.",
+        )
+    user = get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication token.",
+        )
+    if user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Administrator privileges required to export Qdrant collection.",
+        )
+
     dump_filename = f"qdrant_dump_{uuid.uuid4().hex[:8]}.json"
     dump_path = os.path.join(QDRANT_OUTPUT_FOLDER, dump_filename)
     data = export_collection_to_json(
@@ -127,10 +188,11 @@ async def qdrant_export_endpoint(include_full_vectors: bool = False, limit: int 
 @app.post("/api/qdrant/search")
 async def qdrant_search_endpoint(req: SearchQueryRequest):
     """Executes dense vector semantic search against Qdrant collection using BAAI/bge-m3."""
+    court_filter = req.declared_court_type or req.court_type
     results = search_similar_chunks(
         query=req.query,
         top_k=req.top_k,
-        court_type=req.court_type,
+        court_type=court_filter,
         document_id=req.document_id,
     )
     return {
@@ -140,16 +202,25 @@ async def qdrant_search_endpoint(req: SearchQueryRequest):
     }
 
 
+# ----------------------------------------------------------------------
+# Authentication Endpoints
+# ----------------------------------------------------------------------
 @app.post("/api/auth/signup")
 async def signup(req: SignupRequest):
     """
     Registers a public user (Layman / Lawyer) in Supabase auth.users & creates public.profiles.
+    Admin role cannot be self-assigned via this endpoint.
     """
+    # Security: clamp role — public users may only register as layman or lawyer
+    safe_role = req.role.lower().strip() if req.role else "layman"
+    if safe_role not in ("layman", "lawyer"):
+        safe_role = "layman"
+
     auth_data = register_user(
         email=req.email,
         password=req.password,
         name=req.name,
-        role=req.role,
+        role=safe_role,
         license_no=req.license_no,
         cnic=req.cnic,
     )
@@ -188,8 +259,69 @@ async def get_current_user_profile(authorization: Optional[str] = Header(None)):
     return {"user": user}
 
 
+@app.post("/api/auth/admin/create-admin")
+async def create_admin_user(
+    req: SignupRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Allows an existing Administrator to provision new Administrator accounts.
+    Protected strictly by role === 'admin'.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    current_user = get_user_from_token(authorization)
+    if not current_user or current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Only existing administrators can create new admin accounts.",
+        )
+
+    auth_data = register_user(
+        email=req.email,
+        password=req.password,
+        name=req.name,
+        role="admin",
+    )
+    if not auth_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create admin user. Email may already be registered.",
+        )
+    return {
+        "success": True,
+        "message": f"Administrator '{req.email}' created successfully.",
+        "user": auth_data.get("user"),
+    }
+
+
+# ----------------------------------------------------------------------
+# Document Catalog & Streaming Upload Endpoints
+# ----------------------------------------------------------------------
 @app.get("/api/documents")
-async def list_documents(limit: int = 50, offset: int = 0):
+async def list_documents(
+    limit: int = 50,
+    offset: int = 0,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Returns recent judgments from database. Requires authenticated session.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to view document catalog.",
+        )
+    user = get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication session.",
+        )
+
     client = get_supabase_client()
     if not client:
         return {"documents": [], "message": "Supabase not configured"}
@@ -211,32 +343,36 @@ async def list_documents(limit: int = 50, offset: int = 0):
 async def upload_judgment(
     file: UploadFile = File(...),
     dry_run: str = Form(default="true"),
-    court_type: str = Form(default="SC"),
-    court_type_declared: str = Form(default=None),
-    uploaded_by: Optional[str] = Form(default=None),
+    declared_court_type: Optional[str] = Form(default=None),
+    court_type: Optional[str] = Form(default="SC"),
+    court_type_declared: Optional[str] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
     embed_qdrant: str = Form(default="true"),
 ):
-    # Determine user ID: check uploaded_by form field or decode from JWT Authorization header
-    user_id = uploaded_by
-    user_name = None
-    user_email = None
-    if not user_id and authorization:
-        user_info = get_user_from_token(authorization)
-        if user_info:
-            user_id = user_info.get("id")
-            user_name = user_info.get("name")
-            user_email = user_info.get("email")
-            print(f"[Upload Auth] Authenticated user from JWT: {user_name} ({user_email})")
-    elif user_id and authorization:
-        # uploaded_by passed directly, still try to get name/email from token
-        user_info = get_user_from_token(authorization)
-        if user_info:
-            user_name = user_info.get("name")
-            user_email = user_info.get("email")
+    """
+    Secure document ingestion endpoint.
+    Strictly verifies user identity from JWT Bearer token (no user spoofing).
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to upload documents.",
+        )
+
+    user_info = get_user_from_token(authorization)
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session token. Please sign in again.",
+        )
+
+    user_id = user_info.get("id")
+    user_name = user_info.get("name")
+    user_email = user_info.get("email")
+    print(f"[Upload Auth] Authenticated user from JWT: {user_name} ({user_email}) | ID: {user_id}")
 
     # Determine declared court type (defaults to "SC" if unspecified)
-    declared_type = court_type_declared or court_type or "SC"
+    declared_type = declared_court_type or court_type_declared or court_type or "SC"
     declared_type = declared_type.strip().upper()
     if declared_type not in ("SC", "HC"):
         declared_type = "SC" if "supreme" in declared_type.lower() else "HC"
@@ -286,9 +422,9 @@ async def upload_judgment(
                         else:
                             print("[Upload] Cloudflare R2 is not configured. Skipping R2 upload.")
 
-                        # 3. Persist to Supabase Database
+                        # 3. Persist to Supabase Database (uploaded_by strictly linked to JWT user)
                         if is_supabase_configured():
-                            print(f"[Upload] Persisting judgment '{orig_filename}' to Supabase...")
+                            print(f"[Upload] Persisting judgment '{orig_filename}' to Supabase for user {user_id}...")
                             db_result = save_judgment_to_supabase(
                                 result_data=result,
                                 pdf_url=r2_pdf_url,
@@ -304,13 +440,17 @@ async def upload_judgment(
                     # 4. Qdrant Vector Embedding & Verification JSON Generation
                     qdrant_res = None
                     if embed_qdrant.lower() != "false" and result.get("chunks"):
-                        qdrant_res = upsert_judgment_chunks(
-                            result_data=result,
-                            document_id=doc_id,
-                            save_json_file=True,
-                            output_dir=QDRANT_OUTPUT_FOLDER,
-                            include_full_vectors_in_json=True,
-                        )
+                        try:
+                            qdrant_res = upsert_judgment_chunks(
+                                result_data=result,
+                                document_id=doc_id,
+                                save_json_file=True,
+                                output_dir=QDRANT_OUTPUT_FOLDER,
+                                include_full_vectors_in_json=True,
+                            )
+                        except Exception as q_err:
+                            print(f"[Qdrant Embedding Error]: {q_err}")
+                            qdrant_res = {"success": False, "error": str(q_err)}
 
                     final_payload = {
                         "type": "final",

@@ -26,8 +26,7 @@ export default function DocumentIngestion() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("dry_run", saveToDb ? "false" : "true");
-    formData.append("court_type", courtType);
-    formData.append("court_type_declared", courtType);
+    formData.append("declared_court_type", courtType);
 
     const token = localStorage.getItem("token") || localStorage.getItem("access_token") || localStorage.getItem("sb-access-token");
     const headers: Record<string, string> = {};
@@ -42,7 +41,15 @@ export default function DocumentIngestion() {
         body: formData,
       });
 
-      if (!response.ok || !response.body) {
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Authentication required. Please sign in to upload documents.");
+        }
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
+      }
+
+      if (!response.body) {
         throw new Error("Extraction failed - no response stream");
       }
 
@@ -57,7 +64,7 @@ export default function DocumentIngestion() {
         if (event.type === "progress") {
           updateJob(jobId, { stageIndex: event.stage_index });
         } else if (event.type === "final") {
-          const finalCourt = event.metadata?.court_type || courtType;
+          const finalCourt = event.metadata?.declared_court_type || event.metadata?.court_type || courtType;
           const isPersisted = event.db_persisted;
           const statusText = isPersisted ? "SAVED TO DB" : "EXTRACTED";
           

@@ -44,23 +44,22 @@ create extension if not exists "pgcrypto";
 -- ============================================
 -- Profiles (Tied to Supabase auth.users)
 -- ============================================
+-- ============================================
+-- Profiles (Tied to Supabase auth.users)
+-- ============================================
+-- Authentication credentials are managed by Supabase Auth.
+-- The profiles table stores application-level user information only.
+
 create table public.profiles (
     id uuid primary key references auth.users(id) on delete cascade,
     name text,
+    email varchar(255),
     role text not null
         check (role in ('layman', 'lawyer', 'admin')),
     license_no text,
     cnic text,
     verification_status text
-        default 'not_required'
-        check (
-            verification_status in (
-                'not_required',
-                'pending',
-                'approved',
-                'rejected'
-            )
-        ),
+        default 'not_required',
     created_at timestamptz default now()
 );
 
@@ -70,8 +69,8 @@ create table public.profiles (
 create table public.documents (
     id uuid primary key default gen_random_uuid(),
     title text,
-    court_type text not null
-        check (court_type in ('SC', 'HC')),
+    declared_court_type text not null
+        check (declared_court_type in ('SC', 'HC')),
     source_file text,
     pdf_url text,
     total_lines integer default 0,
@@ -294,3 +293,52 @@ create index idx_dictionary_term on public.legal_dictionary(term);
 > **Scalable JSONB Metadata Architecture:**
 > The `documents` table stores core system and routing fields (`title`, `court_type`, `source_file`, `pdf_url`, `total_lines`, `total_chunks`, `uploaded_by`) as top-level columns, while all dynamic, variable, and extracted case metadata (`court`, `case_number`, `judge`, `parties`, `date`, `dates_of_hearing`, `boilerplate_removed`, `advocates`, etc.) are encapsulated in `metadata` (JSONB).
 > A `GIN` index (`idx_documents_metadata`) is applied on `metadata` to guarantee sub-millisecond JSONB query performance at massive scale across millions of judgment records.
+
+---
+
+## Authentication and Profile Design
+
+LexLink uses **Supabase Auth** for user authentication.
+
+Passwords are handled by Supabase Auth and are **not stored in `public.profiles`**.
+
+The `profiles` table stores application-level information about the authenticated user.
+
+The relationship is:
+
+`auth.users.id` → `profiles.id`
+
+### Profile Fields
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `id` | UUID | Yes | Links profile with Supabase Auth user |
+| `name` | TEXT | No | User's name |
+| `email` | VARCHAR(255) | Yes for application use | User email |
+| `role` | TEXT | Yes | `layman`, `lawyer`, or `admin` |
+| `license_no` | TEXT | No | Lawyer license number; not required for students/layman users |
+| `cnic` | TEXT | Currently No | User CNIC; existing records may contain NULL |
+| `verification_status` | TEXT | No | Defaults to `not_required` |
+| `created_at` | TIMESTAMPTZ | Automatic | Profile creation time |
+
+### Current Verification Policy
+
+Lawyer verification is **not required at the current stage**.
+
+The default value of `verification_status` is:
+
+`not_required`
+
+Lawyer verification can be implemented later if required.
+
+### Authentication Rule
+
+The `profiles` table must not contain a password column.
+
+Authentication flow:
+
+1. User signs up or logs in through Supabase Auth.
+2. Supabase Auth handles the email/password credentials.
+3. Supabase Auth provides the authenticated user's identity/token.
+4. The application uses the authenticated user's ID to access the corresponding profile.
+5. The `profiles` table stores application information such as role, CNIC, and license number.

@@ -48,6 +48,8 @@ Thumbs.db
 # Project specific
 frontend/dist/
 backend/chunked_output/
+backend/qdrant_output/
+backend/qdrant_storage/
 
 # Environment files (secrets - never commit these!)
 .env

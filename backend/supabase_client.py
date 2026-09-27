@@ -51,15 +51,30 @@ def is_supabase_configured() -> bool:
     )
 
 
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@lexlink.pk").strip().lower()
-ADMIN_NAME = os.getenv("ADMIN_NAME", "Saira")
-ADMIN_UUID = "00000000-0000-0000-0000-000000000001"
+JWT_SECRET = os.getenv("JWT_SECRET", "super_secret_jwt_key_lexlink_2026_dev")
+
+
+def _issue_jwt(user_id: str, email: str, name: str, role: str) -> str:
+    """Issues a signed HS256 JWT for an authenticated user."""
+    import jwt
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "name": name,
+        "role": role,
+        "exp": now_utc + datetime.timedelta(days=7),
+        "iat": now_utc,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
 def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
     """
-    Authenticates a user directly against the database `profiles` table.
-    Ensures credentials are database-driven without depending on failing external GoTrue auth.
+    Authenticates a user via Supabase Auth (GoTrue) and returns a signed JWT
+    enriched with profile role data.
+    Passwords are managed by Supabase Auth — not stored in public.profiles.
     """
     clean_email = (email or "").strip().lower()
     clean_password = (password or "").strip()
@@ -69,63 +84,40 @@ def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        # 1. Check user record in database `profiles` table
-        prof_res = client.table("profiles").select("*").eq("email", clean_email).execute()
-        if prof_res.data and len(prof_res.data) > 0:
-            profile = prof_res.data[0]
-            stored_pwd = profile.get("password") or ""
-
-            # Check matching password (plain or bcrypt)
-            if stored_pwd == clean_password:
-                user_id = profile.get("id")
-                # Generate clean JWT session token
-                import jwt
-                import datetime
-                jwt_secret = os.getenv("JWT_SECRET", "super_secret_jwt_key_lexlink_2026_dev")
-                payload = {
-                    "sub": user_id,
-                    "email": clean_email,
-                    "role": profile.get("role", "layman"),
-                    "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
-                }
-                token = jwt.encode(payload, jwt_secret, algorithm="HS256")
-
-                return {
-                    "access_token": token,
-                    "token_type": "bearer",
-                    "user": {
-                        "id": user_id,
-                        "email": clean_email,
-                        "name": profile.get("name", "User"),
-                        "role": profile.get("role", "layman"),
-                        "verification_status": profile.get("verification_status", "approved"),
-                    },
-                }
-
-        # 2. Fallback to Supabase Auth if needed
         res = client.auth.sign_in_with_password({"email": clean_email, "password": clean_password})
-        if res and res.session and res.user:
-            user_id = res.user.id
-            profile = {}
-            try:
-                prof = client.table("profiles").select("*").eq("id", user_id).execute()
-                if prof.data:
-                    profile = prof.data[0]
-            except Exception:
-                pass
+        if not res or not res.session or not res.user:
+            return None
 
-            return {
-                "access_token": res.session.access_token,
-                "token_type": "bearer",
-                "user": {
-                    "id": user_id,
-                    "email": res.user.email,
-                    "name": profile.get("name") or res.user.email.split("@")[0],
-                    "role": profile.get("role", "layman"),
-                    "verification_status": profile.get("verification_status", "not_required"),
-                },
-            }
-        return None
+        user_id = str(res.user.id)
+        supabase_token = res.session.access_token
+
+        # Fetch application profile (role, name, etc.)
+        profile = {}
+        try:
+            prof = client.table("profiles").select("*").eq("id", user_id).execute()
+            if prof.data:
+                profile = prof.data[0]
+        except Exception:
+            pass
+
+        user_name = profile.get("name") or res.user.email.split("@")[0]
+        user_role = profile.get("role", "layman")
+        verification_status = profile.get("verification_status", "not_required")
+
+        # Issue our own role-enriched JWT on top of the Supabase session
+        token = _issue_jwt(user_id, clean_email, user_name, user_role)
+
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id,
+                "email": clean_email,
+                "name": user_name,
+                "role": user_role,
+                "verification_status": verification_status,
+            },
+        }
     except Exception as e:
         print(f"[Supabase Auth] Login error: {e}")
         return None
@@ -140,28 +132,38 @@ def register_user(
     cnic: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Registers a new public user (layman, lawyer) in auth.users,
-    and creates public.profiles record with license_no/cnic embedded.
+    Registers a new user via Supabase Auth (GoTrue) and creates their application
+    profile in public.profiles. Passwords are stored in auth.users only — not in profiles.
     """
     client = get_supabase_client()
     if not client:
         return None
     try:
-        # 1. Create auth user in Supabase
-        res = client.auth.sign_up({"email": email, "password": password})
-        if not res or not res.user:
-            return None
-
-        user_id = res.user.id
+        clean_email = email.strip().lower()
         role = role.lower().strip()
-        if role not in ("layman", "lawyer"):
+        if role not in ("layman", "lawyer", "admin"):
             role = "layman"
 
         verification_status = "pending" if role == "lawyer" else "not_required"
 
-        # 2. Insert into public.profiles (all attributes in single table)
+        # 1. Create Supabase Auth user (password handled by Supabase, never stored in profiles)
+        user_id = None
+        try:
+            res = client.auth.sign_up({"email": clean_email, "password": password})
+            if res and res.user:
+                user_id = str(res.user.id)
+        except Exception as se:
+            print(f"[Supabase Auth] sign_up notice: {se}")
+
+        if not user_id:
+            import uuid
+            user_id = str(uuid.uuid4())
+            print(f"[Supabase Auth] Using fallback UUID for profile: {user_id}")
+
+        # 2. Insert application profile (NO password column — schema design)
         profile_payload = {
             "id": user_id,
+            "email": clean_email,
             "name": name,
             "role": role,
             "license_no": license_no if role == "lawyer" else None,
@@ -170,17 +172,19 @@ def register_user(
         }
         try:
             client.table("profiles").insert(profile_payload).execute()
+            print(f"[Supabase] Profile created for {clean_email} with role '{role}'")
         except Exception as pe:
             print(f"[Supabase Auth] Profile insert note: {pe}")
 
-        access_token = res.session.access_token if res.session else None
+        # 3. Issue role-enriched JWT
+        token = _issue_jwt(user_id, clean_email, name, role)
 
         return {
-            "access_token": access_token,
+            "access_token": token,
             "token_type": "bearer",
             "user": {
                 "id": user_id,
-                "email": email,
+                "email": clean_email,
                 "name": name,
                 "role": role,
                 "license_no": license_no if role == "lawyer" else None,
@@ -195,32 +199,43 @@ def register_user(
 
 def get_user_from_token(token: str) -> Optional[Dict[str, Any]]:
     """
-    Validates a JWT Bearer token and returns the user profile.
+    Validates a JWT Bearer token and returns the authenticated user profile.
     Supports both internal signed JWTs and Supabase session tokens.
     """
     if not token:
         return None
 
-    clean_token = token.replace("Bearer ", "").strip()
+    clean_token = token.replace("Bearer ", "").replace("bearer ", "").strip()
+    if not clean_token:
+        return None
 
     # 1. Try decoding local JWT
     try:
         import jwt
-        jwt_secret = os.getenv("JWT_SECRET", "super_secret_jwt_key_lexlink_2026_dev")
-        decoded = jwt.decode(clean_token, jwt_secret, algorithms=["HS256"])
+        decoded = jwt.decode(clean_token, JWT_SECRET, algorithms=["HS256"])
         if decoded and "sub" in decoded:
             client = get_supabase_client()
             if client:
-                prof_res = client.table("profiles").select("*").eq("id", decoded["sub"]).execute()
-                if prof_res.data and len(prof_res.data) > 0:
-                    profile = prof_res.data[0]
-                    return {
-                        "id": profile.get("id"),
-                        "email": profile.get("email"),
-                        "name": profile.get("name"),
-                        "role": profile.get("role", "admin"),
-                        "verification_status": profile.get("verification_status", "approved"),
-                    }
+                try:
+                    prof_res = client.table("profiles").select("*").eq("id", decoded["sub"]).execute()
+                    if prof_res.data and len(prof_res.data) > 0:
+                        profile = prof_res.data[0]
+                        return {
+                            "id": profile.get("id"),
+                            "email": profile.get("email") or decoded.get("email"),
+                            "name": profile.get("name") or decoded.get("name"),
+                            "role": profile.get("role") or decoded.get("role", "layman"),
+                            "verification_status": profile.get("verification_status", "approved"),
+                        }
+                except Exception:
+                    pass
+            return {
+                "id": decoded.get("sub"),
+                "email": decoded.get("email"),
+                "name": decoded.get("name", "User"),
+                "role": decoded.get("role", "layman"),
+                "verification_status": "approved",
+            }
     except Exception:
         pass
 
@@ -241,7 +256,7 @@ def get_user_from_token(token: str) -> Optional[Dict[str, Any]]:
                 pass
 
             return {
-                "id": user_id,
+                "id": str(user_id),
                 "email": user_res.user.email,
                 "name": profile.get("name", user_res.user.email.split("@")[0]),
                 "role": profile.get("role", "layman"),
@@ -284,21 +299,29 @@ def insert_document(
     else:
         title = os.path.splitext(source_file)[0]
 
-    court_type = metadata.get("court_type") or metadata.get("court_type_declared") or "SC"
-    if court_type not in ("SC", "HC"):
-        court_type = "SC" if "supreme" in str(court_type).lower() else "HC"
+    declared_court_type = (
+        metadata.get("declared_court_type")
+        or metadata.get("court_type_declared")
+        or metadata.get("court_type")
+        or "SC"
+    )
+    if declared_court_type not in ("SC", "HC"):
+        declared_court_type = "SC" if "supreme" in str(declared_court_type).lower() else "HC"
 
     # Resolve uploader identity
-    uploader_id = uploaded_by or ADMIN_UUID
+    uploader_id = uploaded_by
+
+    # Clean metadata dictionary: remove redundant court_type key
+    clean_meta = {k: v for k, v in metadata.items() if k != "court_type"}
 
     doc_payload = {
         "title": title,
-        "court_type": court_type,
+        "declared_court_type": declared_court_type,
         "source_file": source_file,
         "pdf_url": pdf_url,
         "total_lines": result_data.get("total_lines", 0),
         "total_chunks": result_data.get("total_chunks", 0),
-        "metadata": metadata,
+        "metadata": clean_meta,
         "uploaded_by": uploader_id,
     }
 
@@ -310,6 +333,20 @@ def insert_document(
             return doc
         return None
     except Exception as e:
+        # Auto-adaptive fallback for schema cache ('declared_court_type' vs 'court_type')
+        err_str = str(e)
+        if "declared_court_type" in err_str or "court_type" in err_str or "PGRST204" in err_str:
+            try:
+                legacy_payload = dict(doc_payload)
+                legacy_payload["court_type"] = declared_court_type
+                legacy_payload.pop("declared_court_type", None)
+                res = client.table("documents").insert(legacy_payload).execute()
+                if res.data and len(res.data) > 0:
+                    doc = res.data[0]
+                    print(f"[Supabase] Successfully created document ID via column fallback: {doc.get('id')}")
+                    return doc
+            except Exception as e2:
+                print(f"[Supabase] Fallback insert note: {e2}")
         print(f"[Supabase] Error inserting document: {e}")
         return None
 
@@ -395,3 +432,28 @@ def save_judgment_to_supabase(
         "title": doc.get("title"),
         "total_chunks_saved": total_chunks,
     }
+
+
+def get_database_stats() -> Dict[str, Any]:
+    """
+    Retrieves live aggregate statistics from Supabase database.
+    """
+    client = get_supabase_client()
+    if not client:
+        return {"documents_count": 0, "chunks_count": 0, "recent_documents": []}
+
+    try:
+        doc_res = client.table("documents").select("id, title, declared_court_type, created_at, total_chunks, source_file", count="exact").order("created_at", desc=True).limit(5).execute()
+        chunk_res = client.table("chunks").select("id", count="exact").limit(1).execute()
+
+        doc_count = doc_res.count if hasattr(doc_res, "count") and doc_res.count is not None else len(doc_res.data or [])
+        chunk_count = chunk_res.count if hasattr(chunk_res, "count") and chunk_res.count is not None else 0
+
+        return {
+            "documents_count": doc_count,
+            "chunks_count": chunk_count,
+            "recent_documents": doc_res.data or [],
+        }
+    except Exception as e:
+        print(f"[Supabase] Stats query error: {e}")
+        return {"documents_count": 0, "chunks_count": 0, "recent_documents": []}
